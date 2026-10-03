@@ -4,35 +4,33 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Speculum — Local LLM Runtime Monitor</title>
-<meta name="description" content="Mirror-glass dashboard for a local LLM runtime: live gauges, token ledger, context map, context graph, live event stream.">
-<link rel="stylesheet" href="glass.css">
-<link rel="stylesheet" href="dashboard.css">
+<meta name="description" content="Live observability dashboard for a local LLM runtime: throughput, GPU, token ledger, context usage, request history, engines, events, KV slots.">
+<script>
+/* Surface runtime errors on the page (no browser console on the monitor box). */
+(function(){function show(m){var d=document.getElementById('js-err');if(!d){d=document.createElement('pre');d.id='js-err';d.style.cssText='position:fixed;left:0;right:0;bottom:0;margin:0;padding:8px 12px;background:#3a0d16;color:#ffd6dd;font:12px/1.4 monospace;z-index:9999;white-space:pre-wrap;max-height:40vh;overflow:auto';(document.body||document.documentElement).appendChild(d);}d.textContent+=m+'\n';}
+addEventListener('error',function(e){show('error: '+e.message+' @ '+(e.filename||'').split('/').pop()+':'+e.lineno+':'+e.colno);});
+addEventListener('unhandledrejection',function(e){var r=e.reason;show('rejection: '+(r&&r.stack?r.stack:r));});})();
+</script>
+<link rel="stylesheet" href="tokens.css">
+<link rel="stylesheet" href="components.css">
+<link rel="stylesheet" href="layout.css">
 </head>
 <body>
-  <div class="aurora" aria-hidden="true">
-    <span class="blob b1"></span>
-    <span class="blob b2"></span>
-    <span class="blob b3"></span>
-  </div>
-  <div class="grain" aria-hidden="true"></div>
+  <header class="topbar" id="topbar" aria-label="Monitor status"></header>
 
-  <main class="deck">
-    <header class="bar glass" id="bar" aria-label="Monitor header"></header>
-    <div class="alertbar glass" id="alertbar" role="alert"></div>
-    <section class="kpi" id="kpi" aria-label="Live metrics"></section>
-    <section class="signal glass" id="signal" aria-label="Throughput signal"></section>
-    <section class="gauges glass" id="gauges" aria-label="Hardware gauges"></section>
-    <section class="context glass" id="context" aria-label="Context map"></section>
-    <section class="ledger glass" id="ledger" aria-label="Token ledger"></section>
-    <section class="ctxgraph glass" id="ctxgraph" aria-label="Context graph"></section>
-    <section class="lanes" id="lanes" aria-label="Model lanes"></section>
-    <section class="stream glass" id="stream" aria-label="Event stream"></section>
-    <aside class="pool glass" id="pool" aria-label="KV slot pool"></aside>
+  <main class="deck" id="deck">
+    <section class="g-kpi"        id="p-kpi"        aria-label="Key metrics"></section>
+    <section class="g-throughput" id="p-throughput" aria-label="Throughput"></section>
+    <section class="g-gpu"        id="p-gpu"        aria-label="GPU and host"></section>
+    <section class="g-context"    id="p-context"    aria-label="Context usage"></section>
+    <section class="g-ledger"     id="p-ledger"     aria-label="Token ledger"></section>
+    <section class="g-requests"   id="p-requests"   aria-label="Request history"></section>
+    <section class="g-engines"    id="p-engines"    aria-label="Engines"></section>
+    <section class="g-events"     id="p-events"     aria-label="Events"></section>
+    <section class="g-pool"       id="p-pool"       aria-label="KV slot pool"></section>
   </main>
 
-  <p class="foot" id="foot">
-    <kbd>P</kbd> pause · live feed: <code>/api/stream</code> (SSE 1 Hz) · <code>?demo</code> runs the seeded simulator
-  </p>
+  <footer class="foot" id="foot"></footer>
 
   <script type="module" src="app.js"></script>
 </body>

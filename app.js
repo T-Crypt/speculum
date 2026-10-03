@@ -1,40 +1,27 @@
 /* =========================================================================
-   app.js — Speculum monitor. Owns the paint loop and all panel rendering.
-
-   Live mode (default): one JSON snapshot primes every panel, then a 1 Hz
-   SSE tick (`/api/stream`) keeps numbers hot; `/api/snapshot` polling is
-   the fallback when SSE is unavailable. Panels with no data show an honest
-   "no data" state instead of invented numbers.
-
-   Demo mode (`?demo`): the seeded simulator stands in for the collector;
-   same state shape, same paint code.
+   app.js — Speculum monitor. Feed (SSE + poll fallback), state, paint loop,
+   and all panel rendering. Live and demo modes fill exactly the same
+   state shape; the paint layer is mode-agnostic.
+   UI primitives: ui.js · view-model: viewmodel.js · ripple: ripple.js
+   No build, no dependencies. One <script type="module">.
    ========================================================================= */
+
+import {
+  prefs, cssVar, invalidateStyleCache, seriesColor, motionReduced,
+  fmtTok, fmtNum, fmtDur, clockStr, upStr, decodeEscapes, deltaText,
+  el, Panel, StaleChip, Stat, Meter, sparkCanvas, paintSpark,
+  Badge, StatusPill, DataTable, TableRow, EmptyState, Skeleton,
+  Chips, Segmented, Menu,
+} from './ui.js';
+import {
+  buildEngineRegistry, engineState, engineBadgeStatus,
+  overallState, staleInfo, staleLabel, tokenLedger,
+} from './viewmodel.js';
+import { applyRippleSetting, pulse } from './ripple.js';
 
 const $ = (s, r = document) => r.querySelector(s);
 const root = document.documentElement;
 const DEMO = new URLSearchParams(location.search).has('demo');
-const REDUCED = matchMedia('(prefers-reduced-motion: reduce)').matches;
-
-/* --- house palette (AETHER // NODE) -------------------------------------- */
-const COL = {
-  cyan: '#66d9ff', cyanHi: '#b9ecff', purple: '#9d8cff', green: '#6fe7ad',
-  yellow: '#f7c76a', red: '#ff7e91', orange: '#ff9d5c',
-  ink: '#eef4fb', ink2: '#c2ccda', muted: '#7e8b9e', faint: '#505c6d',
-  grid: 'rgba(148,174,211,0.10)', hair: 'rgba(148,174,211,0.25)',
-};
-const ORIGIN_COLORS = { ninfer: COL.cyan, llama: COL.purple, strata: COL.green, sim: COL.yellow };
-const accentOf = e => (e && ORIGIN_COLORS[e.origin]) || COL.purple;
-
-/* deterministic resampling for ?demo: same seed, same dashboard */
-function mulberry32(a) {
-  return () => {
-    a |= 0; a = (a + 0x6D2B79F5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 0x21F0FFAD);
-    t = Math.imul(t ^ (t >>> 7), 0x84222325);
-    return ((t ^ (t >>> 16)) >>> 0) / 4294967296;
-  };
-}
-let rand = mulberry32(0xC0FFEE);
 
 /* --- state (both modes fill exactly this shape) --------------------------- */
 const state = {
@@ -53,54 +40,70 @@ const state = {
   alerts: [],
   requests: [],       // newest first (client buffer, capped)
   events: [],         // newest first
-  sessions: [],       // flattened: {id, engine, origin, window, used, cached, accent}
+  sessions: [],       // flattened: {id, engine, engineKey, origin, window, used, cached}
   poolFakes: [],      // demo-only
   t: 0,
 };
 const KPI_KEYS = ['tps', 'rpm', 'p95', 'ttft', 'tpot', 'vram', 'cache', 'reingest', 'mtp', 'queue'];
 const HIST_CAP = 3600;
-
-const KPIS = [
-  { key: 'tps',      label: 'Decode',         unit: 'tok/s', accent: COL.cyan,   fmt: v => v == null ? '—' : String(Math.round(v)) },
-  { key: 'rpm',      label: 'Requests / min', accent: COL.purple, fmt: v => v == null ? '—' : String(Math.round(v)) },
-  { key: 'p95',      label: 'p95 total',      unit: 's',     accent: COL.orange, fmt: v => v == null ? '—' : (v / 1000).toFixed(1) },
-  { key: 'ttft',     label: 'First token',    unit: 's',     accent: COL.red,    fmt: v => v == null ? '—' : (v / 1000).toFixed(2) },
-  { key: 'tpot',     label: 'Per token',      unit: 'ms',    accent: COL.green,  fmt: v => v == null ? '—' : String(Math.round(v)) },
-  { key: 'vram',     label: 'VRAM',           unit: 'GB',    accent: COL.cyanHi, fmt: v => v == null ? '—' : v.toFixed(1) },
-  { key: 'cache',    label: 'Cache hit',      unit: '%',     accent: COL.green,  fmt: v => v == null ? '—' : v.toFixed(1) },
-  { key: 'reingest', label: 'Re-ingest tax',  unit: '%',     accent: COL.yellow, fmt: v => v == null ? '—' : v.toFixed(1) },
-  { key: 'mtp',      label: 'MTP accept',     unit: '%',     accent: COL.cyan,   fmt: v => v == null ? '—' : v.toFixed(1) },
-  { key: 'queue',    label: 'Queue depth',    accent: COL.purple, fmt: v => v == null ? '—' : String(Math.round(v)) },
+/* --- KPI thresholds and specs (single source of truth for value coloring) ---- */
+const THRESHOLDS = {
+  queue:    { warn: 4,    crit: 10,    dir: 'high' },
+  ttft:     { warn: 1000, crit: 2500,  dir: 'low'  },
+  tpot:     { warn: 50,   crit: 120,   dir: 'low'  },
+  p95:      { warn: 5000, crit: 15000, dir: 'low'  },
+  cache:    { warn: 50,   crit: 25,    dir: 'low'  },
+  reingest: { warn: 50,   crit: 75,    dir: 'high' },
+  vram:     { warn: 0.85, crit: 0.95,  dir: 'frac' }, // of total
+  temp:     { warn: 80,   crit: 90,    dir: 'high' },
+  ctx:      { warn: 0.75, crit: 0.90,  dir: 'frac' }, // of window
+};
+function kpiStatus(key, v, extra = {}) {
+  if (v == null || !isFinite(v)) return null;
+  const t = THRESHOLDS[key];
+  if (!t) return null;
+  if (t.dir === 'frac') {
+    const f = v / (extra && extra.total > 0 ? extra.total : 1);
+    return f >= t.crit ? 'crit' : f >= t.warn ? 'warn' : null;
+  }
+  if (t.dir === 'high') return v >= t.crit ? 'crit' : v >= t.warn ? 'warn' : null;
+  return v <= t.crit ? 'crit' : v <= t.warn ? 'warn' : null;
+}
+/* tone = series palette index for the group's accent bar / value / spark
+   (1 cyan, 2 purple, 3 green, 4 yellow); queue sits in Capacity with VRAM
+   so no group column is a single orphan tile */
+const KPI_GROUPS = [
+  { name: 'Throughput', tone: 1, keys: ['tps', 'rpm'] },
+  { name: 'Latency',    tone: 2, keys: ['ttft', 'tpot', 'p95'] },
+  { name: 'Cache',      tone: 3, keys: ['cache', 'reingest', 'mtp'] },
+  { name: 'Capacity',   tone: 4, keys: ['vram', 'queue'] },
 ];
-
-const GAUGES = [
-  { key: 'temp',  label: 'GPU temp',  unit: '°C' },
-  { key: 'util',  label: 'GPU util',  unit: '%',  max: 100, warn: 95 },
-  { key: 'power', label: 'Draw',      unit: 'W' },
-  { key: 'vram',  label: 'VRAM',      unit: 'GB' },
-];
-
-/* --- small helpers -------------------------------------------------------- */
-function fmtTok(n) {
-  if (n == null) return '—';
-  if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
-  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
-  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'k';
-  return String(Math.round(n));
+const KPI_TONE = {};
+for (const g of KPI_GROUPS) for (const k of g.keys) KPI_TONE[k] = g.tone;
+const KPI_SPECS = {
+  tps:      { label: 'Decode rate',    unit: 'tok/s', fmt: v => String(Math.round(v)), diff: d => String(Math.round(d)) },
+  rpm:      { label: 'Requests / min', fmt: v => String(Math.round(v)), diff: d => String(Math.round(d)) },
+  queue:    { label: 'Queue depth',    unit: 'req',   fmt: v => String(Math.round(v)), diff: d => String(Math.round(d)) },
+  ttft:     { label: 'First token',    unit: 's',     fmt: v => (v / 1000).toFixed(2), diff: d => (d / 1000).toFixed(2) + 's' },
+  tpot:     { label: 'Time / token',   unit: 'ms',    fmt: v => String(Math.round(v)), diff: d => String(Math.round(d)) + 'ms' },
+  p95:      { label: 'p95 total',      unit: 's',     fmt: v => (v / 1000).toFixed(1), diff: d => (d / 1000).toFixed(1) + 's' },
+  cache:    { label: 'Cache hit',      unit: '%',     fmt: v => v.toFixed(1), diff: d => d.toFixed(1) + 'pt' },
+  reingest: { label: 'Re-ingest tax',  unit: '%',     fmt: v => v.toFixed(1), diff: d => d.toFixed(1) + 'pt' },
+  mtp:      { label: 'MTP accept',     unit: '%',     fmt: v => v.toFixed(1), diff: d => d.toFixed(1) + 'pt' },
+  vram:     { label: 'VRAM',           unit: 'GB',    fmt: v => v.toFixed(1), diff: d => d.toFixed(1) },
+};
+/* value 15 min (900 s @ 1 Hz) back in a KPI history, or null when unknown */
+function histPrev15m(hist) {
+  if (!Array.isArray(hist) || hist.length < 2) return null;
+  const i = hist.length - 1 - 900;
+  const v = i >= 0 ? hist[i] : hist[0];
+  return isFinite(v) ? v : null;
 }
-function clockStr(t) {
-  const d = new Date((t || Date.now() / 1000) * 1000);
-  return [d.getHours(), d.getMinutes(), d.getSeconds()]
-    .map(x => String(x).padStart(2, '0')).join(':');
-}
-function upStr(sec) {
-  if (sec == null) return '—';
-  const d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600), m = Math.floor((sec % 3600) / 60);
-  return d > 0 ? `${d}d ${h}h` : h > 0 ? `${h}h ${String(m).padStart(2, '0')}m` : `${m}m`;
-}
+/* --- small helpers (data-side) ------------------------------------------- */
 function fit(c) {
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const w = c.clientWidth, h = c.clientHeight;
+  const w = (typeof c.clientWidth === 'number' ? c.clientWidth : 0) || 0;
+  const h = (typeof c.clientHeight === 'number' ? c.clientHeight : 0) || 0;
   const W = Math.max(1, Math.round(w * dpr)), H = Math.max(1, Math.round(h * dpr));
   if (c.width !== W || c.height !== H) { c.width = W; c.height = H; }
   const ctx = c.getContext('2d');
@@ -143,6 +146,7 @@ function normHost(h) {
 }
 
 /* --- feed ------------------------------------------------------------------ */
+const feed = { lastTick: null };
 let es = null, pollTimer = null;
 
 function fetchSnap() {
@@ -169,6 +173,7 @@ function applySnapshot(s) {
   for (const ev of (s.events || []).slice(0, 120)) pushEvent(ev);
   syncEnginesFromTick({ engines: s.engines, strata_up: (s.strata || {}).up });
   state.mode = 'live';
+  feed.lastTick = performance.now();
   refreshDerived();
 }
 
@@ -186,6 +191,7 @@ function applyTick(d) {
   for (const ev of d.new_events || []) pushEvent(ev);
   if (state.mode === 'offline') state.mode = 'live';
   state.feed = 'sse';
+  feed.lastTick = performance.now();
   refreshDerived();
 }
 
@@ -219,10 +225,13 @@ function syncEnginesFromTick(d) {
     }
   }
   if (d.strata_up != null) {
+    /* the tick's strata_up field names the engine key; the display label
+       and window come from the payload itself (see the engines map),
+       never from a UI-side literal */
     let s = state.engines.find(x => x.key === 'strata');
     if (!s) {
-      s = { key: 'strata', label: 'Strata', origin: 'strata', up: d.strata_up, latched: false,
-            queue: null, rates: null, mtp: null, backend: null, window: 131072,
+      s = { key: 'strata', label: 'strata', origin: 'strata', up: d.strata_up, latched: false,
+            queue: null, rates: null, mtp: null, backend: null, window: null,
             sessions: [], counters: null };
       state.engines.push(s);
       state.engHist.strata = [];
@@ -251,13 +260,13 @@ function pushEvent(ev) {
 function refreshDerived() {
   state.sessions = [];
   for (const e of state.engines) {
-    if (!e.up && e.origin !== 'strata') continue;
+    if (!e.up && e.key !== 'strata') continue;
     for (const s of e.sessions || []) {
       state.sessions.push({
         id: s.id + (s.session ? '-' + s.session : ''),
-        engine: e.label, origin: e.origin,
+        engine: e.label, engineKey: e.key, origin: e.origin,
         window: s.window || e.window, used: s.used, cached: s.cached,
-        accent: accentOf(e), processing: s.processing,
+        processing: s.processing,
       });
     }
   }
@@ -266,7 +275,7 @@ function refreshDerived() {
 function openSSE() {
   if (es) { try { es.close(); } catch {} es = null; }
   es = new EventSource('api/stream');
-  es.onopen = () => { state.feed = 'sse'; };
+  es.onopen = () => { state.feed = 'sse'; feed.lastTick = performance.now(); };
   es.addEventListener('tick', ev => { try { applyTick(JSON.parse(ev.data)); } catch {} });
   es.onerror = () => {
     /* server may be restarting — poll until SSE recovers */
@@ -303,6 +312,16 @@ async function bootLive() {
 }
 
 /* --- demo simulator (same state shape) ------------------------------------ */
+function mulberry32(a) {
+  return () => {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 0x21F0FFAD);
+    t = Math.imul(t ^ (t >>> 7), 0x84222325);
+    return ((t ^ (t >>> 16)) >>> 0) / 4294967296;
+  };
+}
+let rand = mulberry32(0xC0FFEE);
+
 const DEMO_MODELS = [
   { id: 'llama-3.3-70b', label: 'Llama 3.3 70B', ctx: 131072, share: 0.34 },
   { id: 'qwen3-32b', label: 'Qwen3 32B', ctx: 65536, share: 0.27 },
@@ -394,6 +413,7 @@ function demoStep() {
     });
   }
   if (rand() < 0.1) demoEvent();
+  feed.lastTick = performance.now();
   refreshDerived();
 }
 
@@ -410,615 +430,747 @@ function demoEvent() {
   pushEvent({ t: Date.now() / 1000, level: pick[0], msg: pick[1]() });
 }
 
-/* --- build ------------------------------------------------------------------ */
-function shell(el) {
-  const s = document.createElement('div');
-  s.className = 'sheen';
-  el.prepend(s);
+/* --- ui settings (persisted under speculum.ui.*) --------------------------- */
+const ui = {
+  theme: prefs.theme,
+  motion: prefs.reduceMotion,
+  ripple: prefs.ripple,
+  panels: [],   // panel modules register: { el, head, chip }
+};
+
+function applyTheme() {
+  root.dataset.theme = ui.theme;
+  invalidateStyleCache();
+}
+function applyMotion() {
+  if (ui.motion === 'on') root.dataset.motion = 'reduced';
+  else delete root.dataset.motion;
+  applyRippleSetting(); // ripple must track the effective motion state
 }
 
-function buildBar() {
-  const bar = $('#bar');
-  shell(bar);
-  bar.insertAdjacentHTML('beforeend', `
-    <span class="orb" id="orb"></span>
-    <div class="brand"><b>Speculum</b><span>local LLM runtime</span></div>
-    <div class="spacer"></div>
-    <span class="chip">node <b id="c-node">—</b></span>
-    <span class="chip">driver <b id="c-driver">—</b></span>
-    <span class="chip">model <b id="c-model">—</b></span>
-    <span class="chip">uptime <b id="c-uptime">—</b></span>
-    <span class="chip" id="c-feed">feed <b id="feedval">…</b></span>
-    <span class="chip">state <b id="runstate">boot</b></span>
-  `);
+/* --- top bar ----------------------------------------------------------------- */
+function settingsRow(label, sub, control) {
+  return el('div', { class: 'menu-row' },
+    el('div', {}, el('div', { class: 'menu-row-label' }, label,
+      sub ? el('small', {}, sub) : null)),
+    control);
 }
 
-function buildAlertbar() {
-  const p = $('#alertbar');
-  shell(p);
-  p.insertAdjacentHTML('beforeend', `<b>ALERT</b><span id="alertmsg"></span>`);
+function buildTopbar() {
+  const bar = $('#topbar');
+  const pill = StatusPill({ state: 'paused', label: 'Booting' });
+  const chip = (id, label, cls = '') => el('span', { class: 'kv' + (cls ? ' ' + cls : '') },
+    label, el('b', { id }, '—'));
+  const menu = Menu('Settings', [
+    settingsRow('Theme', null,
+      Segmented([{ value: 'dark', label: 'Dark' }, { value: 'light', label: 'Light' }], ui.theme, v => {
+        ui.theme = v; prefs.theme = v; applyTheme();
+      })),
+    settingsRow('Reduce motion', 'also follows the OS preference',
+      Segmented([{ value: 'system', label: 'System' }, { value: 'on', label: 'On' }, { value: 'off', label: 'Off' }], ui.motion, v => {
+        ui.motion = v; prefs.reduceMotion = v; applyMotion();
+      })),
+    settingsRow('Ripple effect', 'single pulse on data update',
+      Segmented([{ value: 'off', label: 'Off' }, { value: 'on', label: 'On' }], ui.ripple, v => {
+        ui.ripple = v; prefs.ripple = v; applyRippleSetting();
+      })),
+  ]);
+  bar.append(
+    el('div', { class: 'brand' }, el('b', {}, 'Speculum'), el('span', {}, 'local LLM runtime')),
+    el('span', { class: 'spacer' }),
+    el('div', { class: 'cluster' },
+      pill,
+      chip('tb-gpu', 'GPU'),
+      chip('tb-driver', 'Driver', 'hide-sm'),
+      chip('tb-uptime', 'Uptime'),
+      chip('tb-feed', 'Feed'),
+      menu.el,
+    ),
+  );
+  ui.pill = pill;
+  ui.pillLabel = pill.children[1];
+  ui.tb = {
+    gpu: $('#tb-gpu'), driver: $('#tb-driver'),
+    uptime: $('#tb-uptime'), feed: $('#tb-feed'),
+  };
 }
 
+function renderTopbar() {
+  const o = overallState({ mode: state.mode, paused: state.paused, alerts: state.alerts, engines: state.engines });
+  ui.pill.setAttribute('data-state', o.state);
+  ui.pill.setAttribute('aria-label', 'Overall state: ' + o.word + (state.alerts.length ? ` — ${state.alerts[0]}` : ''));
+  ui.pillLabel.textContent = o.word;
+  ui.tb.gpu.textContent = state.gpu ? state.gpu.name : 'no GPU';
+  ui.tb.driver.textContent = state.gpu ? state.gpu.driver : '—';
+  ui.tb.uptime.textContent = state.host ? upStr(state.host.uptime) : '—';
+  ui.tb.feed.textContent = state.feed;
+}
+
+function renderFoot() {
+  $('#foot').innerHTML =
+    `<kbd>P</kbd> pause · <kbd>R</kbd> resync · feed: ${state.feed} · mode: ${state.mode} · ` +
+    `<code>?demo</code> = seeded simulator`;
+}
+
+/* --- panel registry (panel modules push themselves in) ----------------------- */
+function registerPanel(p) { ui.panels.push(p); return p; }
+function setPanelsStale() {
+  const now = performance.now();
+  const info = state.mode === 'demo' ? null : staleInfo(feed.lastTick, now);
+  for (const p of ui.panels) {
+    p.el.classList.toggle('is-stale', !!info);
+    if (p.chip) p.chip.textContent = info ? staleLabel(info) : 'Stale';
+  }
+}
+
+/* --- panel scaffolding ---------------------------------------------------------- */
+/* one section shell in index.html; returns a registered panel with a stale chip */
+function makePanel(id, title, hint, { flush = false, tools = null } = {}) {
+  const p = Panel({ title, hint, flush, tools });
+  const chip = StaleChip();
+  p.head.append(chip);
+  $('#' + id).append(p.el);
+  return registerPanel({ id, el: p.el, head: p.head, body: p.body, chip, paint: null, render: null, onData: null });
+}
+/* ripple pulse contract: pulse p.el only when the signature string changes
+   (pulse() itself is a no-op while ripple / motion are off) */
+function panelPulse(p, sig) {
+  if (p._pulseSig === sig) return;
+  p._pulseSig = sig;
+  pulse(p.el);
+}
+
+/* --- P1 · KPI strip ----------------------------------------------------------- */
+/* four dense group columns: tile = small-caps label, 30 px mono value in the
+   group tone (threshold status wins), muted unit, delta vs 15 min, 28 px
+   sparkline in the tone. KPI_GROUPS / KPI_SPECS are the single spec. */
 function buildKpi() {
-  const wrap = $('#kpi');
-  for (const k of KPIS) {
-    const el = document.createElement('article');
-    el.className = 'card glass';
-    el.style.setProperty('--glow-c', k.accent);
-    el.innerHTML = `
-      <div class="label">${k.label}</div>
-      <div class="value" data-kpi="${k.key}">—</div>
-      <div class="delta" data-delta="${k.key}"></div>
-      <canvas data-spark="${k.key}"></canvas>`;
-    shell(el);
-    wrap.append(el);
-  }
-}
-
-function buildSignal() {
-  const p = $('#signal');
-  shell(p);
-  p.insertAdjacentHTML('beforeend', `
-    <div class="panel-head"><h2>Signal</h2><p class="hint" id="sighint">tokens / s, rolling 60 min</p></div>
-    <canvas id="chart" aria-label="Rolling throughput chart"></canvas>
-    <div class="legend" id="legend"></div>`);
-}
-
-function buildGauges() {
-  const p = $('#gauges');
-  shell(p);
-  p.insertAdjacentHTML('beforeend', `
-    <div class="panel-head"><h2>Hardware</h2><p class="hint" id="hwname">—</p></div>
-    <div class="gauges">
-      ${GAUGES.map(g => `<div class="gauge"><canvas data-gauge="${g.key}"></canvas><span>${g.label}</span></div>`).join('')}
-    </div>
-    <div class="readout" id="hw-readout"></div>
-    <div class="readout" id="host-readout"></div>`);
-}
-
-function buildContext() {
-  const p = $('#context');
-  shell(p);
-  p.insertAdjacentHTML('beforeend', `
-    <div class="panel-head"><h2>Context map</h2><p class="hint" id="ctxhring">no live sessions</p></div>
-    <canvas id="context-canvas"></canvas>
-    <div class="ctx-legend" id="ctx-legend"></div>`);
-}
-
-function buildLedger() {
-  const p = $('#ledger');
-  shell(p);
-  p.insertAdjacentHTML('beforeend', `
-    <div class="panel-head"><h2>Token ledger</h2><p class="hint">generated / fresh prefill / cached — 1 h · 24 h · since engine start</p></div>
-    <div class="ledger" id="ledger-rows"></div>
-    <div class="mini" id="mini"></div>`);
-}
-
-function buildCtxGraph() {
-  const p = $('#ctxgraph');
-  shell(p);
-  p.insertAdjacentHTML('beforeend', `
-    <div class="panel-head"><h2>Context graph</h2><p class="hint" id="cghint">prompt tokens per request vs model window, most recent first</p></div>
-    <div class="cg-rows" id="cgrows"></div>
-    <div class="cg-legend">
-      <span><i style="background:${COL.cyan}"></i>cached (prefix hit)</span>
-      <span><i style="background:${COL.yellow}"></i>fresh prefill (re-ingest)</span>
-      <span><i style="background:${COL.green}"></i>generated</span>
-    </div>
-    <div class="cg-kpis">
-      <span>re-ingest tax · 15 min <b id="cg-tax">—</b></span>
-      <span>mtp acceptance · 15 min <b id="cg-mtp">—</b></span>
-      <span>cache hit · 15 min <b id="cg-cache">—</b></span>
-      <span class="warn" id="cg-reqs">no requests buffered</span>
-    </div>`);
-}
-
-function buildLanes() {
-  const wrap = $('#lanes');
-  for (const key of ['ninfer', 'strata']) {
-    const el = document.createElement('article');
-    el.className = 'lane glass';
-    el.dataset.lanekey = key;
-    el.tabIndex = 0;
-    el.innerHTML = `
-      <div class="name"><span class="dot"></span><span class="lname">—</span></div>
-      <div class="sub">—</div>
-      <div class="meter"><i></i></div>
-      <div class="grid">
-        <div>tok/s<b data-l="tps">—</b></div>
-        <div>queue<b data-l="queue">—</b></div>
-        <div>mtp<b data-l="mtp">—</b></div>
-      </div>`;
-    shell(el);
-    wrap.append(el);
-  }
-}
-
-function buildStream() {
-  const p = $('#stream');
-  shell(p);
-  p.insertAdjacentHTML('beforeend', `
-    <div class="panel-head"><h2>Stream</h2><p class="hint">runtime events</p></div>
-    <ul id="events" aria-live="polite"></ul>`);
-}
-
-function buildPool() {
-  const p = $('#pool');
-  shell(p);
-  p.insertAdjacentHTML('beforeend', `
-    <div class="panel-head"><h2>Pool</h2><p class="hint" id="poolhint">kv slots</p></div>
-    <div id="poolbody"></div>`);
-}
-
-/* --- paint ------------------------------------------------------------------ */
-function paintSpark(canvas, data, accent) {
-  const { ctx, w, h } = fit(canvas);
-  ctx.clearRect(0, 0, w, h);
-  const d = data.slice(-360);
-  if (d.length < 2) { ctx.fillStyle = COL.faint; ctx.font = '11px ui-monospace, monospace'; ctx.textAlign = 'center'; ctx.fillText('no data', w / 2, h / 2 + 4); return; }
-  const lo = Math.min(...d), hi = Math.max(...d);
-  const span = hi - lo || 1;
-  ctx.lineJoin = 'round';
-  ctx.shadowColor = accent;
-  ctx.shadowBlur = 8;
-  ctx.strokeStyle = accent;
-  ctx.lineWidth = 1.6;
-  ctx.beginPath();
-  d.forEach((v, i) => {
-    const x = (i / (d.length - 1)) * w;
-    const y = h - 3 - ((v - lo) / span) * (h - 8);
-    i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
-  });
-  ctx.stroke();
-  ctx.shadowBlur = 0;
-  ctx.globalAlpha = 0.14;
-  ctx.lineTo(w, h); ctx.lineTo(0, h); ctx.closePath();
-  ctx.fillStyle = accent; ctx.fill();
-  ctx.globalAlpha = 1;
-}
-
-function paintChart() {
-  const c = $('#chart'); if (!c) return;
-  const { ctx, w, h } = fit(c);
-  ctx.clearRect(0, 0, w, h);
-  ctx.strokeStyle = COL.grid;
-  ctx.lineWidth = 1;
-  for (let i = 0; i <= 4; i++) {
-    const y = (i / 4) * h;
-    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
-  }
-  const series = state.engines
-    .map(e => ({ e, data: (state.engHist[e.key] || []).slice(-360) }))
-    .filter(s => s.data.length > 1);
-  let hi = 0;
-  for (const s of series) for (const v of s.data) hi = Math.max(hi, v);
-  if (!series.length || hi <= 0) {
-    ctx.fillStyle = COL.faint; ctx.font = '12px ui-monospace, monospace'; ctx.textAlign = 'center';
-    ctx.fillText('no throughput data yet — waiting for requests', w / 2, h / 2);
-    return;
-  }
-  hi *= 1.12;
-  for (const { e, data } of series) {
-    const accent = accentOf(e);
-    const focused = state.focus === e.key;
-    ctx.shadowColor = accent;
-    ctx.shadowBlur = focused ? 16 : 7;
-    ctx.globalAlpha = state.focus && !focused ? 0.3 : 1;
-    ctx.strokeStyle = accent;
-    ctx.lineWidth = focused ? 2.4 : 1.5;
-    ctx.beginPath();
-    data.forEach((v, i) => {
-      const x = (i / (data.length - 1)) * w;
-      const y = h - 4 - (Math.max(0, v) / hi) * (h - 12);
-      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
-    });
-    ctx.stroke();
-    if (focused) {
-      ctx.globalAlpha = 0.13; ctx.lineTo(w, h); ctx.lineTo(0, h); ctx.closePath();
-      ctx.fillStyle = accent; ctx.fill();
+  const p = makePanel('p-kpi', 'Key metrics', '1 Hz · warn/crit thresholds · delta vs 15 min');
+  const refs = {};
+  const groups = [];
+  for (const g of KPI_GROUPS) {
+    const grp = el('div', { class: 'kpi-group', data: { tone: g.tone } });
+    grp.append(el('div', { class: 'kpi-group-label' }, g.name));
+    for (const k of g.keys) {
+      const spec = KPI_SPECS[k];
+      const spark = sparkCanvas('stat-spark', spec.label + ' trend');
+      const st = Stat({ label: spec.label, unit: spec.unit || null, value: '—', spark });
+      st._unitSpan = spec.unit ? el('span', { class: 'unit' }, spec.unit) : null;
+      grp.append(st.el);
+      refs[k] = st;
     }
-    ctx.globalAlpha = 1; ctx.shadowBlur = 0;
+    groups.push(grp);
   }
+  p.body.append(el('div', { class: 'kpi-groups' }, groups));
+  p.paint = st => {
+    let sig = '';
+    for (const k of KPI_KEYS) {
+      const stt = refs[k], spec = KPI_SPECS[k];
+      const v = st.kpi ? st.kpi[k] : null;
+      const has = v != null && isFinite(v);
+      const vargs = [has ? spec.fmt(v) : '—'];
+      if (stt._unitSpan) vargs.push(stt._unitSpan);
+      stt.value.replaceChildren(...vargs);
+      const extra = k === 'vram'
+        ? { total: (st.kpi && st.kpi.vram_total) || (st.gpu && st.gpu.vramTotal) || 0 }
+        : {};
+      const s2 = kpiStatus(k, has ? v : null, extra);
+      if (s2) stt.value.dataset.status = s2; else stt.value.removeAttribute('data-status');
+      const prev = histPrev15m(st.kpiHist && st.kpiHist[k]);
+      stt.delta.textContent = has ? (deltaText(v, prev, spec.diff, 'vs 15m') || '') : '';
+      paintSpark(stt.spark, (st.kpiHist && st.kpiHist[k]) || [],
+        seriesColor((KPI_TONE[k] || 1) - 1));
+      sig += k + ':' + (has ? Math.round(v) : 'n') + ';';
+    }
+    return sig;
+  };
 }
 
-function gaugeValue(g) {
-  const g2 = state.gpu;
-  if (!g2) return null;
-  if (g.key === 'temp') return { v: g2.temp, max: 95, warn: 80 };
-  if (g.key === 'util') return { v: g2.util, max: 100, warn: 95 };
-  if (g.key === 'power') return { v: g2.power, max: g2.powerLimit || 450, warn: (g2.powerLimit || 450) * 0.9 };
-  if (g.key === 'vram') return { v: g2.vram, max: g2.vramTotal || 24, warn: (g2.vramTotal || 24) * 0.92 };
-  return null;
+/* --- P2 · Throughput ------------------------------------------------------------ */
+/* 1-s-resolution canvas: one line per registry engine (series color), 4 y
+   gridlines, hover crosshair + tooltip; range 15m/1h/6h/24h (24h capped by
+   the 60-min ring buffer — the drawn line spans what exists, right-anchored). */
+const TP_RANGES = [
+  { value: '15m', label: '15m', sec: 900 },
+  { value: '1h', label: '1h', sec: 3600 },
+  { value: '6h', label: '6h', sec: 21600 },
+  { value: '24h', label: '24h', sec: 86400 },
+];
+function tpRangeSec(v) { const r = TP_RANGES.find(x => x.value === v); return r ? r.sec : 3600; }
+function niceTicks(max, n = 4) {
+  if (!(max > 0) || !isFinite(max)) return [0, 1];
+  const raw = max / n;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const norm = raw / mag;
+  const step = (norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10) * mag;
+  const top = Math.ceil(max / step) * step;
+  const out = [];
+  for (let v = 0; v <= top + step * 1e-6; v += step) out.push(v);
+  return out;
 }
-
-function paintGauge(canvas, g) {
-  const { ctx, w, h } = fit(canvas);
-  ctx.clearRect(0, 0, w, h);
-  const cx = w / 2, cy = h / 2 + 4, r = Math.min(w, h) / 2 - 10;
-  const a0 = Math.PI * 0.75, a1 = Math.PI * 2.25;
-  const gv = gaugeValue(g);
-
-  ctx.lineCap = 'round';
-  ctx.strokeStyle = 'rgba(148,174,211,0.14)';
-  ctx.lineWidth = 7;
-  ctx.beginPath(); ctx.arc(cx, cy, r, a0, a1); ctx.stroke();
-
-  if (!gv || gv.v == null) {
-    ctx.fillStyle = COL.faint; ctx.font = '600 14px ui-monospace, monospace'; ctx.textAlign = 'center';
-    ctx.fillText('no gpu', cx, cy + 1);
-    return;
-  }
-  const pct = Math.max(0, Math.min(1, gv.v / gv.max));
-  const hot = gv.v >= gv.warn;
-  const accent = hot ? COL.red : COL.cyan;
-  ctx.shadowColor = accent; ctx.shadowBlur = 14;
-  ctx.strokeStyle = accent; ctx.lineWidth = 7;
-  ctx.beginPath(); ctx.arc(cx, cy, r, a0, a0 + (a1 - a0) * pct); ctx.stroke();
-  ctx.shadowBlur = 0;
-  ctx.strokeStyle = 'rgba(148,174,211,0.28)';
-  ctx.lineWidth = 1;
-  for (let i = 0; i <= 10; i++) {
-    const a = a0 + (a1 - a0) * (i / 10);
-    ctx.beginPath();
-    ctx.moveTo(cx + Math.cos(a) * (r - 6), cy + Math.sin(a) * (r - 6));
-    ctx.lineTo(cx + Math.cos(a) * (r - 11), cy + Math.sin(a) * (r - 11));
-    ctx.stroke();
-  }
-  const txt = g.key === 'util' ? Math.round(gv.v) : g.key === 'power' ? Math.round(gv.v) : gv.v.toFixed(g.key === 'vram' ? 1 : 0);
-  ctx.fillStyle = COL.ink;
-  ctx.font = '600 15px ui-monospace, monospace';
-  ctx.textAlign = 'center';
-  ctx.fillText(String(txt), cx, cy + 1);
-  ctx.fillStyle = COL.muted;
-  ctx.font = '500 10px ui-monospace, monospace';
-  ctx.fillText(g.unit, cx, cy + 14);
-}
-
-function paintContext() {
-  const c = $('#context-canvas'); if (!c) return;
-  const { ctx, w, h } = fit(c);
-  ctx.clearRect(0, 0, w, h);
-  const cx = w / 2, cy = h / 2;
-  const R = Math.min(w, h) / 2 - 10;
-
-  ctx.strokeStyle = 'rgba(148,174,211,0.12)';
-  ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.stroke();
-  for (let i = 0; i < 12; i++) {
-    const a = (i / 12) * Math.PI * 2;
-    ctx.beginPath();
-    ctx.moveTo(cx + Math.cos(a) * R * 0.46, cy + Math.sin(a) * R * 0.46);
-    ctx.lineTo(cx + Math.cos(a) * R, cy + Math.sin(a) * R);
-    ctx.stroke();
-  }
-
-  const ses = state.sessions;
-  if (!ses.length) {
-    ctx.fillStyle = COL.faint; ctx.font = '12px ui-monospace, monospace'; ctx.textAlign = 'center';
-    ctx.fillText('no live sessions', cx, cy - 4);
-    ctx.font = '10px ui-monospace, monospace';
-    ctx.fillText('no engine slots reporting', cx, cy + 12);
-    return;
-  }
-  const n = ses.length;
-  ses.forEach((s, i) => {
-    const r = R * (0.46 + 0.54 * ((i + 1) / n));
-    const frac = s.window ? Math.min(1, (s.used || 0) / s.window) : 0;
-    const a0 = -Math.PI / 2;
-    const a1 = a0 + Math.PI * 2 * frac;
-    ctx.strokeStyle = 'rgba(148,174,211,0.14)';
-    ctx.lineWidth = 5;
-    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.stroke();
-    ctx.shadowColor = s.accent; ctx.shadowBlur = 12;
-    ctx.strokeStyle = s.accent; ctx.lineWidth = 5; ctx.lineCap = 'round';
-    ctx.beginPath(); ctx.arc(cx, cy, r, a0, a1); ctx.stroke();
-    ctx.shadowBlur = 0;
-    if (frac > 0) {
-      ctx.fillStyle = s.accent;
-      ctx.shadowColor = s.accent; ctx.shadowBlur = 10;
+function buildThroughput() {
+  const p = makePanel('p-throughput', 'Throughput', 'decode tok/s per engine · 1 s resolution', {
+    tools: el('span', { class: 'tp-tools' },
+      Segmented(TP_RANGES.map(r => ({ value: r.value, label: r.label })), '1h', v => {
+        tp.range = v; tp.legendDirty = true;
+      })),
+  });
+  const wrap = el('div', { class: 'tp-wrap' });
+  const canvas = el('canvas', { class: 'tp-canvas', 'aria-label': 'Throughput per engine over time' });
+  const tip = el('div', { class: 'tp-tip', hidden: true });
+  wrap.append(canvas, tip);
+  const legend = el('div', { class: 'legend', 'aria-label': 'Engine legend' });
+  p.body.append(wrap, legend);
+  const tp = { range: '1h', canvas, wrap, tip, legend, legendDirty: true, geo: null, hoverX: null };
+  canvas.addEventListener('mousemove', e => {
+    const r = canvas.getBoundingClientRect();
+    tp.hoverX = Math.max(0, Math.min(r.width, e.clientX - r.left));
+  });
+  canvas.addEventListener('mouseleave', () => {
+    tp.hoverX = null;
+    tip.hidden = true;
+  });
+  p.onData = () => { tp.legendDirty = true; };
+  p.paint = st => {
+    const reg = buildEngineRegistry(st.engines);
+    if (tp.legendDirty) {
+      tp.legendDirty = false;
+      tp.legend.replaceChildren(...reg.list.map(e => {
+        const info = engineState(e);
+        return el('span', { class: 'legend-item' },
+          el('span', { class: 'swatch', style: { '--swatch': seriesColor(reg.byKey.get(e.key).colorIndex) } }),
+          e.label || e.key,
+          Badge({ status: engineBadgeStatus(e), label: info.word, dot: false,
+            muted: info.muted && e.up !== true, swatch: null }));
+      }));
+    }
+    const { ctx, w, h } = fit(tp.canvas);
+    const R = TP_RANGES.find(x => x.value === tp.range) || TP_RANGES[1];
+    const pad = { l: 40, r: 6, t: 8, b: 18 };
+    const iw = w - pad.l - pad.r, ih = h - pad.t - pad.b;
+    const series = [];
+    let max = 0;
+    for (const e of reg.list) {
+      const full = st.engHist[e.key] || [];
+      const data = full.slice(-R.sec);
+      for (const v of data) if (isFinite(v) && v > max) max = v;
+      series.push({ e, data, color: seriesColor(reg.byKey.get(e.key).colorIndex) });
+    }
+    const ticks = niceTicks(Math.max(max, 1));
+    const yMax = ticks[ticks.length - 1];
+    /* x for index i of a right-anchored series of length n over R.sec seconds */
+    const xAt = (i, n) => pad.l + iw - ((n - 1 - i) / Math.max(1, R.sec - 1)) * iw;
+    const yAt = v => pad.t + ih - (v / yMax) * ih;
+    ctx.clearRect(0, 0, w, h);
+    ctx.font = `10px ${cssVar('--font-mono')}`;
+    ctx.fillStyle = cssVar('--text-3');
+    ctx.strokeStyle = cssVar('--border');
+    ctx.lineWidth = 1;
+    for (const tv of ticks) {
+      const y = yAt(tv);
+      ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(pad.l + iw, y); ctx.stroke();
+      ctx.textAlign = 'right'; ctx.fillText(fmtTok(tv), pad.l - 5, y + 3);
+    }
+    ctx.strokeStyle = cssVar('--border-strong');
+    ctx.beginPath(); ctx.moveTo(pad.l, pad.t + ih); ctx.lineTo(pad.l + iw, pad.t + ih); ctx.stroke();
+    for (const s of series) {
+      const n = s.data.length;
+      if (n < 2) continue;
+      ctx.strokeStyle = s.color;
+      ctx.lineWidth = 1;
       ctx.beginPath();
-      ctx.arc(cx + Math.cos(a1) * r, cy + Math.sin(a1) * r, 2.6, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.shadowBlur = 0;
+      let started = false;
+      for (let i = 0; i < n; i++) {
+        const v = s.data[i];
+        if (v == null || !isFinite(v)) { started = false; continue; }
+        const x = xAt(i, n), y = yAt(v);
+        started ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+        started = true;
+      }
+      ctx.stroke();
     }
-  });
-
-  if (!REDUCED) {
-    const a = -Math.PI / 2 + ((Date.now() / 1000 / 12) % 1) * Math.PI * 2;
-    const grad = ctx.createLinearGradient(cx, cy, cx + Math.cos(a) * R, cy + Math.sin(a) * R);
-    grad.addColorStop(0, 'rgba(238,244,251,0.30)');
-    grad.addColorStop(1, 'rgba(238,244,251,0)');
-    ctx.strokeStyle = grad; ctx.lineWidth = 1.4;
-    ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx + Math.cos(a) * R, cy + Math.sin(a) * R); ctx.stroke();
-  }
-
-  const total = ses.reduce((s, x) => s + (x.used || 0), 0);
-  ctx.fillStyle = COL.ink;
-  ctx.font = '600 15px ui-monospace, monospace';
-  ctx.textAlign = 'center';
-  ctx.fillText(fmtTok(total), cx, cy + 1);
-  ctx.fillStyle = COL.muted;
-  ctx.font = '500 9px ui-monospace, monospace';
-  ctx.fillText('ctx used', cx, cy + 13);
-}
-
-function paint() {
-  for (const k of KPIS) {
-    const c = document.querySelector(`canvas[data-spark="${k.key}"]`);
-    if (c) paintSpark(c, state.kpiHist[k.key] || [], k.accent);
-  }
-  for (const g of GAUGES) {
-    const c = document.querySelector(`canvas[data-gauge="${g.key}"]`);
-    if (c) paintGauge(c, g);
-  }
-  paintChart();
-  paintContext();
-}
-
-/* --- text readouts ----------------------------------------------------------- */
-function renderText() {
-  /* header */
-  $('#c-node').textContent = state.gpu ? state.gpu.name : 'no gpu';
-  $('#c-driver').textContent = state.gpu ? state.gpu.driver : '—';
-  const active = state.engines.find(e => e.up) || state.engines[0];
-  $('#c-model').textContent = active ? (active.label + (active.latched ? ' ⚠' : '')) : '—';
-  $('#c-uptime').textContent = state.host ? upStr(state.host.uptime) : '—';
-  $('#runstate').textContent = state.paused ? 'paused' : state.mode;
-  const feed = $('#feedval');
-  feed.textContent = state.feed;
-  $('#c-feed').className = 'chip' + (state.mode === 'offline' ? ' alert' : state.mode === 'live' ? ' ok' : '');
-  const warn = (state.alerts && state.alerts.length) || (state.gpu && state.gpu.temp != null && state.gpu.temp >= 80);
-  $('#orb').classList.toggle('warn', !!warn);
-
-  /* alert bar */
-  const ab = $('#alertbar');
-  if (state.alerts && state.alerts.length) {
-    ab.classList.add('on');
-    $('#alertmsg').textContent = state.alerts[0] + (state.alerts.length > 1 ? `  (+${state.alerts.length - 1} more)` : '');
-  } else {
-    ab.classList.remove('on');
-  }
-
-  /* kpi cards */
-  for (const k of KPIS) {
-    const el = document.querySelector(`[data-kpi="${k.key}"]`);
-    const d = document.querySelector(`[data-delta="${k.key}"]`);
-    if (!el) continue;
-    const v = state.kpi[k.key];
-    el.innerHTML = v == null ? '—' : `${k.fmt(v)}${k.unit ? ` <small>${k.unit}</small>` : ''}`;
-    const h = state.kpiHist[k.key] || [];
-    if (d) {
-      if (h.length >= 2 && v != null) {
-        const prev = h[h.length - 2] || 0;
-        const diff = v - prev;
-        d.textContent = `${diff >= 0 ? '+' : ''}${diff.toFixed(1)}`;
-        d.className = 'delta ' + (diff >= 0 ? 'up' : 'down');
-      } else { d.textContent = ''; d.className = 'delta'; }
-    }
-  }
-
-  /* signal legend */
-  $('#legend').innerHTML = state.engines.map(e =>
-    `<span><i style="background:${accentOf(e)};box-shadow:0 0 10px ${accentOf(e)}"></i>${e.label}${e.up ? '' : ' · down'}</span>`).join('');
-
-  /* gauges readout */
-  $('#hwname').textContent = state.gpu ? `${state.gpu.name} · ${state.gpu.pcie}` : 'no gpu data';
-  $('#hw-readout').innerHTML = state.gpu ? [
-    ['sm clock', state.gpu.clockSm != null ? state.gpu.clockSm + ' MHz' : '—'],
-    ['mem clock', state.gpu.clockMem != null ? state.gpu.clockMem + ' MHz' : '—'],
-    ['fan', state.gpu.fan != null ? Math.round(state.gpu.fan) + ' rpm' : 'n/a'],
-    ['power limit', Math.round(state.gpu.powerLimit || 0) + ' W'],
-  ].map(([a, b]) => `<span>${a} <b>${b}</b></span>`).join('') : '<span>—</span>';
-  $('#host-readout').innerHTML = state.host ? [
-    ['cpu', state.host.cpu != null ? state.host.cpu.toFixed(1) + '%' : '—'],
-    ['ram', `${state.host.ramUsed != null ? state.host.ramUsed.toFixed(1) : '—'} / ${state.host.ramTotal != null ? state.host.ramTotal.toFixed(1) : '—'} GB`],
-    ['load', state.host.load.map(x => x.toFixed(2)).join(' · ') || '—'],
-    ['top procs', (state.host.procs || []).slice(0, 2).map(p => `${p.name} ${p.rss_gb != null ? p.rss_gb + 'G' : '?'}`).join(' · ') || '—'],
-  ].map(([a, b]) => `<span>${a} <b>${b}</b></span>`).join('') : '<span>—</span>';
-
-  /* context map */
-  $('#ctxhring').textContent = state.sessions.length
-    ? `${state.sessions.length} live session${state.sessions.length > 1 ? 's' : ''} vs model window` : 'no live sessions';
-  $('#ctx-legend').innerHTML = state.sessions.slice(0, 8).map(s =>
-    `<span><i style="background:${s.accent}"></i>${s.id} · ${s.engine} · ${fmtTok(s.used)}/${fmtTok(s.window)}</span>`).join('')
-    || '<span>—</span>';
-
-  /* ledger */
-  renderLedger();
-  renderCtxGraph();
-
-  /* lanes */
-  for (const el of document.querySelectorAll('.lane')) {
-    const key = el.dataset.lanekey;
-    const e = state.engines.find(x => x.key === key);
-    el.style.setProperty('--glow-c', e ? accentOf(e) : COL.purple);
-    el.dataset.off = e && !e.up ? '1' : '0';
-    const dot = el.querySelector('.dot');
-    const acc = e ? (e.latched ? COL.red : accentOf(e)) : COL.faint;
-    dot.style.color = acc; dot.style.background = acc;
-    el.querySelector('.lname').textContent = e ? e.label : key;
-    el.querySelector('.sub').textContent = e
-      ? `${e.origin} · ${e.window ? fmtTok(e.window) + ' ctx' : 'ctx ?'} · ${e.backend ? e.backend.replace('http://', '') : e.up ? 'ready' : 'stopped'}`
-      : 'not running';
-    const meter = el.querySelector('.meter i');
-    const acc2 = e ? accentOf(e) : COL.faint;
-    meter.style.background = acc2;
-    meter.style.boxShadow = `0 0 14px ${acc2}`;
-    let occ = 0;
-    if (e) for (const s of e.sessions || []) occ = Math.max(occ, s.window ? (s.used || 0) / s.window : 0);
-    meter.style.width = (e && e.up ? Math.round(occ * 100) : 0) + '%';
-    const rate = e && e.rates ? (e.rates.decode_tps != null ? e.rates.decode_tps : e.rates.gen_tps_inst) : null;
-    el.querySelector('[data-l="tps"]').textContent = rate != null ? Math.round(rate) : '—';
-    el.querySelector('[data-l="queue"]').textContent = e && e.queue != null ? e.queue : '—';
-    el.querySelector('[data-l="mtp"]').textContent = e && e.mtp != null ? e.mtp + '%' : '—';
-  }
-
-  /* pool */
-  renderPool();
-
-  /* events */
-  const ul = $('#events');
-  if (ul) {
-    if (!state.events.length) {
-      ul.innerHTML = '<li><span class="t">—</span><span class="lv" style="color:var(--faint)">idle</span><span class="msg" style="color:var(--faint)">no events yet</span></li>';
+    /* x-axis time labels: start / end of the drawn window */
+    ctx.fillStyle = cssVar('--text-3');
+    ctx.textAlign = 'left';
+    ctx.fillText('−' + fmtDur(R.sec * 1000), pad.l, h - 5);
+    ctx.textAlign = 'right';
+    ctx.fillText('now', pad.l + iw, h - 5);
+    /* crosshair + tooltip rebuilt from last-paint geometry */
+    tp.geo = { pad, iw, ih, R, series, yMax, w, h, xAt, yAt };
+    if (tp.hoverX != null) {
+      const gx = Math.max(pad.l, Math.min(pad.l + iw, tp.hoverX));
+      ctx.strokeStyle = cssVar('--border-strong');
+      ctx.beginPath(); ctx.moveTo(gx, pad.t); ctx.lineTo(gx, pad.t + ih); ctx.stroke();
+      const secAgo = Math.round((pad.l + iw - gx) / iw * (R.sec - 1));
+      const rows = [];
+      let html = `<span class="t">${secAgo === 0 ? 'now' : '−' + secAgo + 's'}</span>`;
+      for (const s of series) {
+        const n = s.data.length;
+        if (!n) continue;
+        const i = Math.max(0, Math.min(n - 1, n - 1 - Math.round(secAgo * (n - 1) / Math.max(1, R.sec - 1))));
+        const v = s.data[i];
+        const val = isFinite(v) ? String(Math.round(v)) : '—';
+        html += `<span class="row"><span class="swatch" style="background:${s.color}"></span>${s.e.label || s.e.key}<b>${val}</b></span>`;
+        rows.push(s.e.key + ':' + val);
+      }
+      tip.innerHTML = html;
+      tip.hidden = false;
+      const left = gx + 14 + 140 > w ? Math.max(4, gx - 14 - 140) : gx + 14;
+      tip.style.left = left + 'px';
     } else {
-      ul.innerHTML = state.events.slice(0, 14).map(ev => {
-        const t = ev.t ? clockStr(ev.t) : clockStr();
-        return `<li data-lv="${ev.level}"><span class="t">${t}</span><span class="lv">${ev.level}</span><span class="msg">${String(ev.msg).replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]))}</span></li>`;
-      }).join('');
+      tip.hidden = true;
     }
-  }
-
-  $('#foot').innerHTML = `<kbd>P</kbd> pause · feed: <code>${state.feed}</code> · mode: <code>${state.mode}</code> · collector serves <code>/api/snapshot</code> + <code>/api/stream</code> · <code>?demo</code> = simulator`;
+    return R.value + '|' + series.map(s => s.e.key + ':' + Math.round(s.data[s.data.length - 1] || 0)).join(',');
+  };
+  return { tp, p };
 }
 
-function renderLedger() {
-  const reqs = state.requests;
-  const nowT = Date.now() / 1000;
-  const win = (sec) => reqs.filter(r => (r.t || 0) >= nowT - sec);
-  const sum = (arr, f) => arr.reduce((a, r) => a + (f(r) || 0), 0);
-  const engineGen = () => {
-    let g = 0;
-    for (const e of state.engines) {
-      const c = e.counters || {};
-      g += (c['llamacpp:tokens_predicted_total'] != null)
-        ? c['llamacpp:tokens_predicted_total']
-        : (c['tokens_predicted_total'] != null ? c['tokens_predicted_total'] : 0);
+/* --- P3 · GPU & host -------------------------------------------------------------- */
+/* four meters (static fractions, built once, updated via Meter.set) + two
+   key/value readout columns. n/a styling wherever a source is missing. */
+function buildGpu() {
+  const p = makePanel('p-gpu', 'GPU & host', 'no data yet');
+  const hintEl = [...p.head.children].find(c => c.className === 'panel-hint');
+  const mTemp = Meter({ label: 'Temp', value: null, max: 100, unit: '°C',
+    ticks: [{ at: 0.8, status: 'warn' }, { at: 0.9, status: 'crit' }] });
+  const mUtil = Meter({ label: 'Util', value: null, max: 100, unit: '%' });
+  const mPow  = Meter({ label: 'Power', value: null, unit: 'W' });
+  const mVram = Meter({ label: 'VRAM', value: null, unit: 'GB' });
+  const col = (title, rows) => {
+    const c = el('div', { class: 'readout-col' });
+    c.append(el('h3', {}, title));
+    for (const r of rows) c.append(r.el);
+    return c;
+  };
+  const kv = label => {
+    const b = el('b', { class: 'na' }, 'n/a');
+    const r = el('div', { class: 'readout' }, el('span', {}, label), b);
+    return { el: r, val: b };
+  };
+  const rSm = kv('SM clock'), rMem = kv('Mem clock'), rFan = kv('Fan'),
+        rPwLim = kv('Power limit'), rPcie = kv('Link');
+  const rCpu = kv('CPU'), rRam = kv('RAM'), rLoad = kv('Load 1/5/15'),
+        rProc1 = kv('Top process'), rProc2 = kv('2nd process');
+  p.body.append(mTemp.el, mUtil.el, mPow.el, mVram.el,
+    el('div', { class: 'readout-grid' },
+      col('Device', [rSm, rMem, rFan, rPwLim, rPcie]),
+      col('Host', [rCpu, rRam, rLoad, rProc1, rProc2])));
+  const setR = (ref, val, fmt) => {
+    const bad = val == null || (typeof val === 'number' && !isFinite(val));
+    if (bad) {
+      ref.val.textContent = 'n/a'; ref.val.classList.add('na');
+    } else {
+      ref.val.textContent = fmt(val); ref.val.classList.remove('na');
     }
-    return g || null;
   };
-  const engineFresh = () => {
-    let p = 0, ch = 0;
-    for (const e of state.engines) {
-      const c = e.counters || {};
-      p += c['llamacpp:prompt_tokens_total'] || 0;
-      ch += c['ninfer:prefix_cache_hit_tokens_total'] || 0;
+  p.render = st => {
+    const g = st.gpu, ho = st.host;
+    if (hintEl) hintEl.textContent = g ? `${g.name} · ${g.driver}` : 'no GPU data';
+    mTemp.set(g ? g.temp : null, 100, g ? kpiStatus('temp', g.temp) : null);
+    mUtil.set(g ? g.util : null, 100);
+    mPow.set(g ? g.power : null, g ? g.powerLimit : null);
+    mVram.set(g ? g.vram : null, g ? g.vramTotal : null,
+      g && g.vram != null && g.vramTotal ? kpiStatus('vram', g.vram, { total: g.vramTotal }) : null);
+    setR(rSm, g && g.clockSm, v => Math.round(v) + ' MHz');
+    setR(rMem, g && g.clockMem, v => Math.round(v) + ' MHz');
+    setR(rFan, g && g.fan, v => Math.round(v) + ' RPM');
+    setR(rPwLim, g && g.powerLimit, v => Math.round(v) + ' W');
+    setR(rPcie, g && g.pcie !== '—' ? g.pcie : null, v => v);
+    setR(rCpu, ho && ho.cpu, v => fmtNum(v, 1) + '%');
+    setR(rRam, ho && ho.ramUsed, v => `${fmtNum(v, 1)} / ${fmtNum(ho.ramTotal, 1)} GB`);
+    setR(rLoad, ho && ho.load && ho.load.length ? ho.load.join('/') : null, v => v);
+    const procs = (ho && ho.procs) || [];
+    setR(rProc1, procs[0], pr => `${pr.name || pr.cmd || '?'} · ${fmtNum(pr.rss_gb, 1)} GB`);
+    setR(rProc2, procs[1], pr => `${pr.name || pr.cmd || '?'} · ${fmtNum(pr.rss_gb, 1)} GB`);
+  };
+}
+
+/* --- P4 · Token ledger ------------------------------------------------------------ */
+/* rows generated/fresh/cached × [last hour, last 24 h, since start] (the view
+   model), one 100 %-stacked mix bar per column, footer reqs/MTP/cache/re-ingest,
+   honest notes when the request buffer is capped or empty. */
+function buildLedger() {
+  const p = makePanel('p-ledger', 'Token ledger', 'prompt + generated tokens by window', { flush: true });
+  const dt = DataTable({ columns: [
+    { label: 'Window', width: '96px' },
+    { label: 'Last hour', num: true },
+    { label: 'Last 24 h', num: true },
+    { label: 'Since start', num: true },
+  ], caption: 'Token ledger' });
+  const foot = el('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '4px 16px' } });
+  const mkStat = label => {
+    const s = el('span', { class: 'head-stat' }, el('span', {}, label), el('b', {}, '—'));
+    foot.append(s);
+    return s;
+  };
+  const fRe = mkStat('Re-ingest'), fMtp = mkStat('MTP accept'),
+        fCache = mkStat('Cache hit'), fReqs = mkStat('Buffered');
+  const notes = el('div');
+  p.body.append(dt.wrap, foot, notes);
+  const ROWS = ['generated', 'fresh', 'cached'];
+  const LABEL = { generated: 'Generated', fresh: 'Fresh (prompt − cache)', cached: 'Cached (reused)' };
+  p.render = st => {
+    const L = tokenLedger(st);
+    const cells = (row, cls) => [
+      { text: row === 'split' ? 'Split' : LABEL[row], cls: row === 'split' ? 'col-sub' : undefined },
+      ...L.cols.map(c => {
+        if (row === 'split') {
+          const tot = (c.generated || 0) + (c.fresh || 0) + (c.cached || 0);
+          const bar = el('div', { class: 'mix' });
+          for (const part of ['generated', 'fresh', 'cached']) {
+            const v = c[part] || 0;
+            const i = el('i', { style: { width: tot > 0 ? (100 * v / tot).toFixed(2) + '%' : '0%', background: `var(--tok-${part})` } });
+            bar.append(i);
+          }
+          return { el: bar };
+        }
+        return c[row] == null ? null : { text: fmtTok(c[row]), cls };
+      }),
+    ];
+    dt.tbody.replaceChildren(...ROWS.map(r => TableRow(cells(r, 'col-num col-mono'))), TableRow(cells('split')));
+    const setF = (elx, v, status) => {
+      elx.children[1].textContent = v == null ? '—' : fmtNum(v, 1) + '%';
+      if (status) elx.dataset.status = status; else elx.removeAttribute('data-status');
+    };
+    setF(fRe, L.footer.reingest, kpiStatus('reingest', L.footer.reingest));
+    setF(fMtp, L.footer.mtp);
+    setF(fCache, L.footer.cache, kpiStatus('cache', L.footer.cache));
+    fReqs.children[1].textContent = String(L.footer.reqs);
+    notes.replaceChildren(...L.notes.map(n => el('p', { class: 'ledger-note' }, n)));
+    return sig4(L);
+  };
+  /* 1 Hz table + honest notes live in render; the pulse signature rides the same hook */
+  p.onData = st => {
+    const L = tokenLedger(st);
+    panelPulse(p, `led:${L.footer.reqs}:${L.footer.cache != null ? Math.round(L.footer.cache) : '-'}:${L.notes.length}`);
+  };
+}
+function sig4(L) {
+  return L.cols.map(c => `${c.generated ?? '-'}|${c.fresh ?? '-'}|${c.cached ?? '-'}`).join(';');
+}
+
+/* --- P5 · Context usage --------------------------------------------------------------- */
+/* one row per live session (cap 20 + "…N more"): mono id, engine badge,
+   used / window, 10 px meter with 0.75 / 0.90 threshold ticks. */
+function buildContext() {
+  const p = makePanel('p-context', 'Context usage', 'live sessions vs model window');
+  const list = el('div', { class: 'ctx-list' });
+  const more = el('p', { class: 'ledger-note', hidden: true });
+  const empty = EmptyState('No active sessions');
+  p.body.append(list, more, empty);
+  const CTX_MAX = 20;
+  p.render = st => {
+    const sessions = st.sessions || [];
+    empty.hidden = sessions.length > 0;
+    const reg = buildEngineRegistry(st.engines);
+    const show = sessions.slice(0, CTX_MAX);
+    const rows = show.map(s => {
+      const ci = reg.byKey.get(s.engineKey) ? reg.byKey.get(s.engineKey).colorIndex : 0;
+      const frac = s.window > 0 ? s.used / s.window : 0;
+      const status = kpiStatus('ctx', s.used, { total: s.window });
+      const bar = el('div', { class: 'meter', role: 'meter',
+        ...(s.window ? { 'aria-valuemax': String(s.window), 'aria-valuenow': String(s.used) } : {}),
+        'aria-label': (s.id || 'session') + ' context fill' });
+      const fill = el('i', { class: 'meter-fill' });
+      fill.style.width = (Math.max(0, Math.min(1, frac)) * 100).toFixed(2) + '%';
+      if (status) fill.dataset.status = status;
+      bar.append(fill);
+      bar.append(el('i', { class: 'meter-tick', 'data-status': 'warn', style: { left: '75%' } }));
+      bar.append(el('i', { class: 'meter-tick', 'data-status': 'crit', style: { left: '90%' } }));
+      return el('div', { class: 'ctx-row' },
+        el('span', { class: 'ctx-id' }, s.id || '—'),
+        Badge({ status: 'idle', label: s.engine || s.engineKey || '—', dot: false,
+          swatch: seriesColor(ci) }),
+        bar,
+        el('span', { class: 'ctx-used' },
+          `${fmtTok(s.used)} / ${fmtTok(s.window)}`));
+    });
+    list.replaceChildren(...rows);
+    const n = sessions.length;
+    more.textContent = n > CTX_MAX ? `…${n - CTX_MAX} more` : '';
+    more.hidden = n <= CTX_MAX;
+    return sessions.map(s => s.id + s.engineKey).join(',');
+  };
+  /* ripple pulses on structural change (sessions appearing / leaving), not on
+     the per-second used-token jitter */
+  p.onData = st => {
+    const sig = (st.sessions || []).map(s => s.id + s.engineKey).join(',');
+    panelPulse(p, sig);
+  };
+}
+
+/* --- P6 · Request history ----------------------------------------------------------- */
+/* newest first: time / model / cached-vs-fresh split / prompt / window / TTFT /
+   decode. 14 rows + "Show more" (14 more, cap 50). Head stats: re-ingest, MTP,
+   cache, buffered (same ledger footer as the token ledger). */
+const REQ_STEP = 14, REQ_CAP = 50;
+function buildRequests() {
+  const p = makePanel('p-requests', 'Request history', 'newest first · client buffer capped at 500', { flush: true });
+  const fRe = el('span', { class: 'head-stat' }, el('span', {}, 'Re-ingest'), el('b', {}, '—'));
+  const fMtp = el('span', { class: 'head-stat' }, el('span', {}, 'MTP'), el('b', {}, '—'));
+  const fCa = el('span', { class: 'head-stat' }, el('span', {}, 'Cache'), el('b', {}, '—'));
+  const fBuf = el('span', { class: 'head-stat' }, el('span', {}, 'Buffered'), el('b', {}, '—'));
+  const more = el('button', { type: 'button', class: 'chip', hidden: true }, 'Show more');
+  let shown = REQ_STEP;
+  more.addEventListener('click', () => {
+    shown = Math.min(REQ_CAP, shown + REQ_STEP);
+    more.hidden = shown >= REQ_CAP || shown >= state.requests.length;
+  });
+  p.head.append(fRe, fMtp, fCa, fBuf, more);
+  const dt = DataTable({ columns: [
+    { label: 'Time', mono: true, width: '64px' },
+    { label: 'Model', width: '180px' },
+    { label: 'Split (cached · fresh)', width: '140px' },
+    { label: 'Prompt', num: true },
+    { label: 'Window', num: true },
+    { label: 'TTFT', num: true },
+    { label: 'Decode', num: true },
+  ], caption: 'Request history' });
+  p.body.append(dt.wrap, EmptyState('No requests recorded yet'));
+  const emptyEl = p.body.children[p.body.children.length - 1];
+  p.render = st => {
+    const L = tokenLedger(st);
+    const setF = (elx, v, status) => {
+      elx.children[1].textContent = v == null ? '—' : fmtNum(v, 1) + '%';
+      if (status) elx.dataset.status = status; else elx.removeAttribute('data-status');
+    };
+    setF(fRe, L.footer.reingest, kpiStatus('reingest', L.footer.reingest));
+    setF(fMtp, L.footer.mtp);
+    setF(fCa, L.footer.cache, kpiStatus('cache', L.footer.cache));
+    fBuf.children[1].textContent = String(L.footer.reqs);
+    const reqs = st.requests || [];
+    emptyEl.hidden = reqs.length > 0;
+    const rows = reqs.slice(0, shown).map(r => TableRow([
+      { text: clockStr(r.t), cls: 'col-mono' },
+      { text: r.model || '—' },
+      { el: mixBar(r) },
+      { text: fmtTok(r.prompt), cls: 'col-num col-mono', title: `cached ${fmtTok(r.cache)} · fresh ${fmtTok(r.fresh)}` },
+      { text: fmtTok(r.window), cls: 'col-num col-mono' },
+      { text: fmtDur(r.ttft_s != null ? r.ttft_s * 1000 : null), cls: 'col-num col-mono' },
+      { text: r.decode_tps != null ? `${fmtNum(r.decode_tps, 0)} t/s` : '—', cls: 'col-num col-mono' },
+    ]));
+    dt.tbody.replaceChildren(...rows);
+    more.hidden = shown >= REQ_CAP || shown >= reqs.length;
+    return reqs.length + '/' + shown;
+  };
+}
+/* 100 %-stacked cached-vs-fresh prompt split; window is the bar's frame */
+function mixBar(r) {
+  const prompt = Math.max(0, r.prompt || 0);
+  const cached = Math.min(prompt, r.cache || 0);
+  const fresh = Math.min(prompt - cached, Math.max(0, r.fresh != null ? r.fresh : prompt - cached));
+  const bar = el('div', { class: 'mix', role: 'img',
+    'aria-label': `prompt split: ${fmtTok(cached)} cached, ${fmtTok(fresh)} fresh` });
+  const seg = (v, tok) => {
+    const i = el('i');
+    i.style.width = prompt > 0 ? (100 * v / prompt).toFixed(2) + '%' : '0%';
+    i.style.background = `var(--tok-${tok})`;
+    bar.append(i);
+  };
+  seg(cached, 'cached');
+  seg(fresh, 'fresh');
+  return bar;
+}
+
+/* --- P7 · Engines ------------------------------------------------------------------- */
+/* one inset card per engine from the payload registry (never a UI-side
+   literal): swatch + label + state badge in words, origin · window · backend
+   subline, tok-s / queue / MTP stats, throughput sparkline. Down engines are
+   muted and stated in words. */
+function buildEngines() {
+  const p = makePanel('p-engines', 'Engines', 'registry from the runtime payload');
+  const grid = el('div', { class: 'engine-grid' });
+  p.body.append(grid);
+  const cards = new Map(); // engine key -> { card, label, badge, sub, sTps, sQueue, sMtp, spark }
+  p.render = st => {
+    const reg = buildEngineRegistry(st.engines);
+    for (const e of reg.list) {
+      let c = cards.get(e.key);
+      if (!c) {
+        const spark = sparkCanvas('engine-spark', (e.label || e.key) + ' throughput');
+        const sTps = el('b', {}, '—'), sQueue = el('b', {}, '—'), sMtp = el('b', {}, '—');
+        const card = el('div', { class: 'engine-card' },
+          el('div', { class: 'ec-head' },
+            el('span', { class: 'swatch', style: { background: seriesColor(reg.byKey.get(e.key).colorIndex) } }),
+            el('span', { class: 'ec-name' }, e.label || e.key),
+            el('span', { class: 'spacer' })),
+          el('div', { class: 'ec-sub' }),
+          el('div', { class: 'ec-stats' },
+            el('div', { class: 'ec-stat' }, el('span', {}, 'tok/s'), sTps),
+            el('div', { class: 'ec-stat' }, el('span', {}, 'queue'), sQueue),
+            el('div', { class: 'ec-stat' }, el('span', {}, 'MTP'), sMtp)),
+          spark);
+        c = { card, label: card.children[0].children[1], badge: null,
+              sub: card.children[1], sTps, sQueue, sMtp, spark };
+        const b = Badge({ status: 'idle', label: '—', dot: false });
+        c.badge = b;
+        card.children[0].append(b);
+        cards.set(e.key, c);
+        grid.append(card);
+      }
+      const info = engineState(e);
+      c.label.textContent = e.label || e.key;
+      c.badge.replaceChildren(info.word);
+      c.badge.dataset.status = engineBadgeStatus(e);
+      if (info.muted) c.badge.classList.add('badge--muted'); else c.badge.classList.remove('badge--muted');
+      c.sub.textContent = [
+        e.origin || '—',
+        e.window ? `${fmtTok(e.window)} ctx` : null,
+        e.backend || (e.up === true ? 'local' : 'no backend'),
+      ].filter(Boolean).join(' · ');
+      c.card.classList.toggle('is-muted', info.muted);
+      const rate = e.rates ? (e.rates.decode_tps != null ? e.rates.decode_tps : e.rates.gen_tps_inst) : null;
+      c.sTps.textContent = rate != null ? String(Math.round(rate)) : '—';
+      c.sQueue.textContent = e.queue != null ? String(e.queue) : '—';
+      c.sMtp.textContent = e.mtp != null ? fmtNum(e.mtp, 1) + '%' : '—';
     }
-    return (p || ch) ? Math.max(0, p - ch) : null;
+    /* drop cards whose engine left the registry */
+    for (const [key, c] of [...cards]) {
+      if (!reg.byKey.has(key)) { cards.delete(key); c.card.parentNode && grid.replaceChildren(...[...grid.children].filter(x => x !== c.card)); }
+    }
+    return reg.list.map(e => `${e.key}:${e.up}:${e.latched}:${e.queue}`).join(';');
   };
-  const engineCache = () => {
-    let ch = 0;
-    for (const e of state.engines) ch += (e.counters || {})['ninfer:prefix_cache_hit_tokens_total'] || 0;
-    return ch || null;
+  p.paint = st => {
+    const reg = buildEngineRegistry(st.engines);
+    for (const [key, c] of cards) {
+      if (!reg.byKey.has(key)) continue;
+      paintSpark(c.spark, st.engHist[key] || [], seriesColor(reg.byKey.get(key).colorIndex));
+    }
+    return null;
   };
-  const windows = [
-    { label: '1 h', sec: 3600 },
-    { label: '24 h', sec: 86400 },
-    { label: 'since start', sec: null },
-  ];
-  const kinds = [
-    { name: 'generated', color: COL.green, winSum: a => sum(a, r => r.output), since: engineGen },
-    { name: 'fresh prefill', color: COL.yellow, winSum: a => sum(a, r => r.fresh), since: engineFresh },
-    { name: 'cached (reused)', color: COL.cyan, winSum: a => sum(a, r => r.cache), since: engineCache },
-  ];
-  const vals = [];
-  for (const k of kinds) for (const w of windows) {
-    const a = w.sec ? win(w.sec) : reqs;
-    vals.push(w.sec ? k.winSum(a) : k.since());
-  }
-  const maxv = Math.max(1, ...vals.map(v => v || 0));
-  $('#ledger-rows').innerHTML = kinds.map((k, ki) =>
-    windows.map((w, wi) => {
-      const v = vals[ki * 3 + wi];
-      const barw = v ? Math.max(2, 100 * v / maxv) : 0;
-      return `<div class="row">
-        <span class="rl">${k.name} <small>· ${w.label}</small></span>
-        <div class="rb"><i style="width:${barw}%;background:${k.color};box-shadow:0 0 14px ${k.color}66"></i></div>
-        <span class="rv">${v ? fmtTok(v) : '—'}</span>
-      </div>`;
-    }).join('')
-  ).join('');
-
-  const n = reqs.length;
-  const avg = n ? Math.round(reqs.reduce((a, r) => a + (r.output || 0) + (r.cache || 0) + (r.fresh || 0), 0) / n) : null;
-  $('#mini').innerHTML = [
-    ['reqs buffered', String(n)],
-    ['avg tok/req', avg != null ? fmtTok(avg) : '—'],
-    ['sessions', String(state.sessions.length)],
-    ['re-ingest 15m', state.kpi.reingest != null ? state.kpi.reingest.toFixed(1) + '%' : '—'],
-    ['mtp 15m', state.kpi.mtp != null ? state.kpi.mtp.toFixed(1) + '%' : '—'],
-    ['power limit', state.gpu ? Math.round(state.gpu.powerLimit || 0) + ' W' : '—'],
-  ].map(([a, b]) => `<span>${a} <b>${b}</b></span>`).join('');
+  p.onData = st => {
+    const reg = buildEngineRegistry(st.engines);
+    panelPulse(p, reg.list.map(e => `${e.key}:${e.up}:${e.latched}`).join(';'));
+  };
 }
 
-function renderCtxGraph() {
-  const rows = state.requests.slice(0, 14);
-  const el = $('#cgrows');
-  if (!rows.length) {
-    el.innerHTML = '<div class="nodata"><b>NO DATA</b><span>no inference requests buffered yet</span></div>';
-  } else {
-    el.innerHTML = rows.map(r => {
-      const scale = r.window || (r.cache || 0) + (r.fresh || 0) + (r.output || 0) || 1;
-      const w = x => Math.max(0, Math.min(100, 100 * (x || 0) / scale));
-      const id = String(r.id || '').replace(/^req#|^sim-|swap-/g, '');
-      const lbl = `<b>${clockStr(r.t)}</b> ${r.model || r.origin || '?'}${id ? ' · ' + id : ''}`;
-      const tail = r.window ? `${fmtTok((r.cache || 0) + (r.fresh || 0) + (r.output || 0))} / ${fmtTok(r.window)}` : fmtTok(r.output || 0);
-      return `<div class="cg-row">
-        <span class="cg-lbl" title="${r.detail || ''}">${lbl}</span>
-        <div class="cg-bar">
-          <i style="width:${w(r.cache)}%;background:${COL.cyan}"></i><i style="width:${w(r.fresh)}%;background:${COL.yellow}"></i><i style="width:${w(r.output)}%;background:${COL.green}"></i>
-        </div>
-        <span class="cg-val">${tail}</span>
-      </div>`;
-    }).join('');
-  }
-  const set = (id, v, suffix = '') => { const e = $(id); if (e) e.textContent = v == null ? '—' : v + suffix; };
-  set('#cg-tax', state.kpi.reingest != null ? state.kpi.reingest.toFixed(1) : null, '%');
-  const m = $('#cg-mtp');
-  if (m) m.textContent = state.kpi.mtp != null ? state.kpi.mtp.toFixed(1) + '%' : '—';
-  set('#cg-cache', state.kpi.cache != null ? state.kpi.cache.toFixed(1) : null, '%');
-  $('#cg-reqs').textContent = `${state.requests.length} buffered (last 14 shown)`;
+/* --- P8 · Events -------------------------------------------------------------------- */
+/* severity pills + message (escapes decoded at render time), rows expand to the
+   full text; severity chips + text filter + autoscroll-pause in the head;
+   newest first, capped at 60 rows. */
+const EV_SEVS = [
+  { value: 'all', label: 'All' },
+  { value: 'req', label: 'Req' },
+  { value: 'ok', label: 'OK' },
+  { value: 'info', label: 'Info' },
+  { value: 'warn', label: 'Warn', swatch: cssVar('--warn') },
+  { value: 'err', label: 'Err', swatch: cssVar('--crit') },
+];
+const EV_CAP = 60;
+function buildEvents() {
+  const ev = { sev: 'all', filter: '', autoscroll: true, lastFirst: null };
+  const filterInput = el('input', { type: 'text', class: 'ev-filter',
+    placeholder: 'filter…', 'aria-label': 'Filter events by text' });
+  filterInput.addEventListener('input', () => { ev.filter = filterInput.value.trim().toLowerCase(); });
+  const pauseBtn = el('button', { type: 'button', class: 'chip', 'aria-pressed': 'true' }, 'Autoscroll');
+  pauseBtn.addEventListener('click', () => {
+    ev.autoscroll = !ev.autoscroll;
+    pauseBtn.setAttribute('aria-pressed', String(ev.autoscroll));
+  });
+  const p = makePanel('p-events', 'Events', 'newest first · cap ' + EV_CAP,
+    { flush: true, tools: el('span', { class: 'ev-tools' },
+      Chips(EV_SEVS, 'all', v => { ev.sev = v; }), filterInput, pauseBtn) });
+  const dt = DataTable({ columns: [
+    { label: 'Time', mono: true, width: '64px' },
+    { label: 'Level', width: '56px' },
+    { label: 'Message' },
+  ], caption: 'Events' });
+  const wrap = el('div', { class: 'ev-wrap' }, dt.el);
+  const empty = EmptyState('No events yet');
+  p.body.append(wrap, empty);
+  const match = e => {
+    if (ev.sev !== 'all') {
+      if (ev.sev === 'err') { if (e.level !== 'err' && e.level !== 'alert') return false; }
+      else if (e.level !== ev.sev) return false;
+    }
+    if (ev.filter && !(e.msg || '').toLowerCase().includes(ev.filter)) return false;
+    return true;
+  };
+  p.render = st => {
+    const all = (st.events || []).slice(0, EV_CAP);
+    const shown = all.filter(match);
+    empty.hidden = shown.length > 0;
+    const kids = [];
+    for (const e of shown) {
+      const row = TableRow([
+        { text: clockStr(e.t), cls: 'col-mono' },
+        { el: el('span', { class: 'lv-pill', data: { sev: e.level } }, e.level) },
+        { el: el('span', { class: 'ev-msg' }, decodeEscapes(e.msg)) },
+      ], { expandable: true });
+      kids.push(row);
+      const detail = el('tr', { class: 'row-detail' }, el('td', { colspan: 3 }, decodeEscapes(e.msg)));
+      detail.hidden = true;
+      kids.push(detail);
+    }
+    dt.tbody.replaceChildren(...kids);
+    /* autoscroll: stay pinned to the newest row unless the user scrolled away
+       or paused autoscroll */
+    const first = shown.length ? (shown[0].t || 0) + '|' + (shown[0].level || '') : null;
+    if (ev.autoscroll && ev.lastFirst && first && first !== ev.lastFirst && (wrap.scrollTop || 0) < 40) {
+      wrap.scrollTo(0, 0);
+    }
+    ev.lastFirst = first;
+    return all.length + '/' + shown.length;
+  };
+  p.onData = st => {
+    const n = (st.events || []).length;
+    panelPulse(p, 'ev:' + n + ':' + ((st.events && st.events[0] && st.events[0].t) || 0));
+  };
 }
 
-function renderPool() {
-  const body = $('#poolbody');
-  if (!body) return;
-  const ses = state.sessions;
-  const demo = state.mode === 'demo';
-  const count = demo ? 32 : Math.max(ses.length, 0);
-  const cells = body.querySelectorAll('.cell');
-  $('#poolhint').textContent = demo ? '32 kv slots (sim)' : `${count} kv slot${count === 1 ? '' : 's'} · fill = prompt vs window`;
-  if (!count) {
-    body.innerHTML = '<div class="nodata"><b>NO DATA</b><span>no engine slots reporting</span></div>';
-    return;
-  }
-  if (cells.length !== count) {
-    body.innerHTML = Array.from({ length: count }, (_, i) => {
-      const s = ses[i] || {};
-      const acc = demo ? [COL.cyan, COL.purple, COL.green, COL.yellow, COL.orange][i % 5] : (s.accent || COL.purple);
-      return `<div class="cell"><span>${demo ? 'kv' + i : s.id || 's' + i}</span><i style="background:${acc};box-shadow:0 0 12px ${acc}"></i></div>`;
-    }).join('');
-  }
-  const cs = body.querySelectorAll('.cell i');
-  for (let i = 0; i < count; i++) {
-    let p = 0;
-    if (demo) p = state.poolFakes[i] || 0;
-    else { const s = ses[i]; p = s && s.window ? Math.min(1, (s.used || 0) / s.window) : 0; }
-    if (cs[i]) cs[i].style.height = Math.round(p * 100) + '%';
-  }
+/* --- P9 · KV pool --------------------------------------------------------------------- */
+/* one cell per live KV slot: fill height = used vs window, fill color = the
+   engine's series color, pct + session id. Demo fills 32 seeded fakes. */
+function buildPool() {
+  const p = makePanel('p-pool', 'KV pool', 'slots vs model window');
+  const grid = el('div', { class: 'pool-grid' });
+  const empty = EmptyState('No active slots');
+  p.body.append(grid, empty);
+  p.render = st => {
+    const reg = buildEngineRegistry(st.engines);
+    let items;
+    if (st.mode === 'demo') {
+      items = (st.poolFakes || []).map((f, i) => ({ id: `slot ${i + 1}`, engineKey: 'sim', pct: f }));
+    } else {
+      items = (st.sessions || []).map(s => ({
+        id: s.id, engineKey: s.engineKey,
+        pct: s.window > 0 ? s.used / s.window : 0,
+      }));
+    }
+    empty.hidden = items.length > 0;
+    grid.replaceChildren(...items.map(it => {
+      const ci = reg.byKey.get(it.engineKey) ? reg.byKey.get(it.engineKey).colorIndex : 0;
+      const h = Math.max(0, Math.min(1, it.pct || 0));
+      const cell = el('div', { class: 'pool-cell', 'aria-label': `${it.id} at ${Math.round(h * 100)}%` },
+        el('i', { class: 'fill', style: { height: (h * 100).toFixed(1) + '%', background: seriesColor(ci) } }));
+      cell.append(el('span', { class: 'pct' }, Math.round(h * 100) + '%'));
+      cell.append(el('span', { class: 'sid' }, it.id));
+      return cell;
+    }));
+    return items.length + ':' + items.reduce((a, b) => a + Math.round(b.pct), 0);
+  };
 }
 
-/* --- pointer light ----------------------------------------------------------- */
-let pending = null;
-addEventListener('pointermove', e => {
-  if (REDUCED) return;
-  const card = e.target.closest('.glass');
-  if (!card) return;
-  pending = { card, x: e.clientX, y: e.clientY };
-}, { passive: true });
-
-function applyLight() {
-  if (pending) {
-    const { card, x, y } = pending;
-    const r = card.getBoundingClientRect();
-    card.style.setProperty('--mx', `${((x - r.left) / r.width * 100).toFixed(1)}%`);
-    card.style.setProperty('--my', `${((y - r.top) / r.height * 100).toFixed(1)}%`);
-    pending = null;
+/* --- paint loop --------------------------------------------------------------- */
+function paint() {
+  /* panel paint hooks register here: p.paint(state, { reduced }) may return a
+     signature string — the panel pulses only when it changes */
+  for (const p of ui.panels) {
+    if (p.paint) {
+      const sig = p.paint(state, { reduced: motionReduced() });
+      if (typeof sig === 'string') panelPulse(p, sig);
+    }
+    if (p.onData) p.onData(state);
   }
-  requestAnimationFrame(applyLight);
+}
+function renderText() {
+  renderTopbar();
+  renderFoot();
+  setPanelsStale();
+  for (const p of ui.panels) if (p.render) p.render(state);
 }
 
-/* --- keys ---------------------------------------------------------------------- */
+/* --- keys ------------------------------------------------------------------------ */
 addEventListener('keydown', e => {
   if (e.key === 'p' || e.key === 'P') state.paused = !state.paused;
   if (e.key === 'r' || e.key === 'R') {
@@ -1032,9 +1184,20 @@ addEventListener('keydown', e => {
   }
 });
 
-/* --- run ------------------------------------------------------------------------ */
-buildBar(); buildAlertbar(); buildKpi(); buildSignal(); buildGauges(); buildContext();
-buildLedger(); buildCtxGraph(); buildLanes(); buildStream(); buildPool();
+/* --- run --------------------------------------------------------------------------- */
+applyTheme();
+applyMotion();
+applyRippleSetting();
+buildTopbar();
+buildKpi();
+buildThroughput();
+buildGpu();
+buildLedger();
+buildContext();
+buildRequests();
+buildEngines();
+buildEvents();
+buildPool();
 
 if (DEMO) {
   initDemo();

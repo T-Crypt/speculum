@@ -1,0 +1,131 @@
+/* =========================================================================
+   layout.css — Speculum page layout (grid + top bar).
+   Material lives in tokens.css/components.css; layout lives here.
+   Deck: centred, max-width 1720 px, 24 px side padding, 12 columns.
+   Collapses at 1440 / 1024 / 768 px.
+   ========================================================================= */
+
+/* --- deck grid ------------------------------------------------------------- */
+.deck {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: var(--sp-3);
+  width: min(1720px, 100%);
+  margin: 0 auto;
+  padding: var(--sp-3) 24px var(--sp-5);
+}
+
+/* section shells (filled by panel modules in app.js) */
+.g-kpi        { grid-column: 1 / -1; }
+.g-throughput { grid-column: 1 / 8; }
+.g-gpu        { grid-column: 8 / 13; }
+.g-context    { grid-column: 1 / 7; }
+.g-ledger     { grid-column: 7 / 13; }
+.g-requests   { grid-column: 1 / -1; }
+.g-events     { grid-column: 1 / 8; }
+.g-pool       { grid-column: 8 / 13; }
+
+/* engines: one card per engine, from the registry */
+.g-engines {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: var(--sp-3);
+  align-content: start;
+}
+
+/* --- top bar (48px, full-bleed hairline over the centred deck) -------------- */
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  height: 48px;
+  padding: 0 24px;
+  background: var(--surface-1);
+  border-bottom: 1px solid var(--border);
+}
+.topbar .brand {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  margin-right: var(--sp-2);
+  white-space: nowrap;
+}
+.topbar .brand b {
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-1);
+}
+.topbar .brand span { font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.08em; text-transform: lowercase; color: var(--text-3); }
+.topbar .spacer { flex: 1; }
+.topbar .cluster {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  min-width: 0;
+}
+.topbar .cluster .kv {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--sp-1);
+  font-size: var(--fs-meta);
+  color: var(--text-3);
+  white-space: nowrap;
+}
+.topbar .cluster .kv b {
+  font-size: var(--fs-label);
+  font-weight: 500;
+  color: var(--text-1);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
+}
+
+/* --- foot --------------------------------------------------------------------- */
+.foot {
+  width: min(1720px, 100%);
+  margin: 0 auto;
+  padding: 0 24px var(--sp-4);
+  font-size: var(--fs-meta);
+  color: var(--text-3);
+}
+.foot kbd {
+  font-family: var(--font-mono);
+  font-size: var(--fs-meta);
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-ctl);
+  background: var(--surface-2);
+}
+
+/* --- responsive ------------------------------------------------------------------ */
+/* 1440 px: the deck is still full-width here (cap 1720) — only KPI spacing
+   tightens (components.css); the grid stays 12 columns */
+@media (max-width: 1024px) {
+  .deck { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+  .g-throughput,
+  .g-gpu,
+  .g-events,
+  .g-pool { grid-column: 1 / 7; }
+  .g-context { grid-column: 1 / 4; }
+  .g-ledger  { grid-column: 4 / 7; }
+}
+
+@media (max-width: 768px) {
+  .deck { grid-template-columns: 1fr; padding: var(--sp-2) var(--sp-3) var(--sp-4); }
+  .g-kpi, .g-throughput, .g-gpu, .g-context, .g-ledger,
+  .g-requests, .g-engines, .g-events, .g-pool { grid-column: 1 / -1; }
+  .g-engines { grid-template-columns: 1fr; }
+  .topbar { gap: var(--sp-2); padding: 0 var(--sp-2); }
+  .topbar .brand span { display: none; }
+  .topbar .cluster { gap: var(--sp-2); }
+  .topbar .cluster .kv b { max-width: 90px; }
+  .topbar .hide-sm { display: none; }
+}

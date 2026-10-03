@@ -1,0 +1,177 @@
+/* =========================================================================
+   tokens.css — Speculum design tokens: themes, typography, base document.
+   Dark is the default (AETHER // NODE palette: near-black base, hairline
+   borders, cyan/purple/green/yellow/orange/red series); light theme via
+   <html data-theme="light">.
+   Operator override (2026-10-03): the flat-only contract is lifted for the
+   sanctioned soft effects — the faint radial body wash, the panel inner-top
+   highlight, status-pill glows, and the sparkline area-fill glow. Radial
+   gauges remain out. Components read these tokens; nothing is hardcoded.
+
+   Contrast: every text token passes WCAG AA (4.5:1) on every surface it
+   may sit on, in both themes. The light-theme status/series values are the
+   darkened house hues, verified at 4.79:1 or better on white.
+   ========================================================================= */
+
+:root {
+  color-scheme: dark;
+
+  /* --- surfaces (AETHER // NODE: near-black, hairline edges) ---------- */
+  --bg:            #05070A;
+  --surface-1:     #0B1017;
+  --surface-2:     #131B27;
+  --border:        rgba(148, 174, 211, 0.14);
+  --border-strong: rgba(148, 174, 211, 0.28);
+  --inner-hl:      rgba(222, 237, 255, 0.05);   /* 1px inner top edge, panels */
+
+  /* --- text (AA on all surfaces) -------------------------------------- */
+  --text-1: #EEF4FB;
+  --text-2: #C2CCDA;
+  --text-3: #7E8B9E;
+
+  /* --- accent: interactive state + bright "high" text accent ----------- */
+  --accent:      #66D9FF;
+  --accent-high: #B9ECFF;
+  --accent-soft: rgba(102, 217, 255, 0.12);
+
+  /* --- status: state only, never decoration ---------------------------- */
+  --ok:   #6FE7AD;
+  --warn: #F7C76A;
+  --crit: #FF7E91;
+  --idle: #6B7280;
+
+  --ok-soft:   color-mix(in srgb, var(--ok)   13%, transparent);
+  --warn-soft: color-mix(in srgb, var(--warn) 13%, transparent);
+  --crit-soft: color-mix(in srgb, var(--crit) 13%, transparent);
+  --idle-soft: color-mix(in srgb, var(--idle) 18%, transparent);
+
+  /* --- series palette (assigned by stable engine index, max 6) ---------
+     order: cyan, purple, green, yellow, orange, red */
+  --ser-1: #66D9FF;
+  --ser-2: #9D8CFF;
+  --ser-3: #6FE7AD;
+  --ser-4: #F7C76A;
+  --ser-5: #FF9D5C;
+  --ser-6: #FF7E91;
+
+  /* fixed semantic series — identical colors in every panel ------------ */
+  --tok-cached:    var(--ser-3);   /* green  */
+  --tok-fresh:     var(--ser-5);   /* orange */
+  --tok-generated: var(--ser-1);   /* cyan   */
+
+  /* --- shape & spacing -------------------------------------------------- */
+  --r-panel: 6px;
+  --r-ctl:   4px;
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+
+  /* --- type (lab-docs rhythm: display type for chrome, mono for numbers) */
+  --fs-meta:   11px;   /* meta / captions / chips / group labels */
+  --fs-label:  12px;   /* labels, sentence case, no tracking     */
+  --fs-body:   13px;   /* body                                   */
+  --fs-title:  14px;   /* panel titles, uppercase, .08em tracking */
+  --fs-value:  30px;   /* KPI values, mono                       */
+  --fw-title:  600;
+  --fw-value:  600;
+
+  /* display face for headings + group labels; no external fetch — falls
+     through to system-ui when Chakra Petch is not installed */
+  --font-display: "Chakra Petch", system-ui, ui-sans-serif, sans-serif;
+  --font-sans: "Inter", system-ui, ui-sans-serif, "Segoe UI", "Helvetica Neue", sans-serif;
+  --font-mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+
+  /* --- motion -------------------------------------------------------------- */
+  --dur-fast: 120ms;   /* control feedback */
+  --dur-slow: 400ms;   /* data-driven transitions */
+}
+
+/* --- light theme: same house hues, darkened to pass AA on white ---------- */
+[data-theme="light"] {
+  color-scheme: light;
+
+  --bg:            #F4F6FA;
+  --surface-1:     #FFFFFF;
+  --surface-2:     #EEF2F8;
+  --border:        #D8DEE8;
+  --border-strong: #B9C2D0;
+  --inner-hl:      rgba(38, 58, 90, 0.05);
+
+  --text-1: #10161E;
+  --text-2: #3B4654;
+  --text-3: #5A6678;
+
+  --accent:      #0E7490;
+  --accent-high: #075E75;
+  --accent-soft: rgba(14, 116, 144, 0.10);
+
+  --ok:   #0C7A52;
+  --warn: #8A5A09;
+  --crit: #C23A50;
+  --idle: #6B7280;
+
+  --ser-1: #0E7490;
+  --ser-2: #6D5BD0;
+  --ser-3: #0C7A52;
+  --ser-4: #8A5A09;
+  --ser-5: #B35A12;
+  --ser-6: #C23A50;
+}
+
+/* --- base document ------------------------------------------------------ */
+* { box-sizing: border-box; }
+
+html, body { height: 100%; }
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: var(--fs-body);
+  line-height: 1.45;
+  color: var(--text-1);
+  background-color: var(--bg);
+  /* sanctioned soft effect: very faint radial cyan/purple wash, top of page */
+  background-image:
+    radial-gradient(1100px 520px at 18% -140px, rgba(102, 217, 255, 0.07), transparent 62%),
+    radial-gradient(1300px 640px at 82% -180px, rgba(157, 140, 255, 0.06), transparent 64%);
+  background-attachment: fixed;
+  font-variant-numeric: tabular-nums;   /* numbers never shift layout */
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+
+::selection {
+  background: rgba(102, 217, 255, 0.28);
+}
+[data-theme="light"] body {
+  background-image:
+    radial-gradient(1100px 520px at 18% -140px, rgba(14, 116, 144, 0.05), transparent 62%),
+    radial-gradient(1300px 640px at 82% -180px, rgba(109, 91, 208, 0.045), transparent 64%);
+}
+[data-theme="light"] ::selection {
+  background: rgba(14, 116, 144, 0.22);
+}
+
+/* interactive state only: visible 2px accent ring, keyboard-reachable */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* monospace is reserved for logs, IDs, model identifiers, timestamps */
+
+/* explicit user setting (settings menu): same effect as the OS override */
+[data-motion="reduced"] *, [data-motion="reduced"] *::before, [data-motion="reduced"] *::after {
+  animation: none !important;
+  transition: none !important;
+}
+.mono { font-family: var(--font-mono); }
+
+/* --- motion policy ------------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
