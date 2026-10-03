@@ -1,7 +1,11 @@
 /* =========================================================================
-   glass.css — the material only: theme, mirror glass, glow, motion.
-   Layout lives in dashboard.css. Every @property uses `syntax:` (a `format:`
-   descriptor is invalid and silently kills interpolation).
+   glass.css — the material: AETHER // NODE house palette, mirror glass,
+   glow, motion. Layout lives in dashboard.css.
+   Palette from the Lab docs site house.css (docs-site/src/styles/house.css):
+   near-black blue-grey base, hairlines over shadows, mono-forward numbers.
+   Headings 'Chakra Petch' with system fallback — no external font fetches.
+   Every @property uses `syntax:` (a `format:` descriptor is invalid and
+   silently kills interpolation).
    ========================================================================= */
 
 @property --edge   { syntax: '<angle>';      initial-value: 0deg;   inherits: false; }
@@ -15,15 +19,29 @@
   --r-md: 14px;
   --r-sm: 9px;
 
-  --bg:     oklch(0.16 0.018 262);
-  --ink:    oklch(0.94 0.015 250);
-  --muted:  oklch(0.70 0.03 250);
-  --line:   oklch(0.95 0.02 250 / 0.10);
-  --line-2: oklch(0.95 0.02 250 / 0.16);
+  /* house palette */
+  --bg:     #05070a;
+  --ink:    #eef4fb;   /* primary text */
+  --ink-2:  #c2ccda;   /* secondary text */
+  --muted:  #7e8b9e;   /* tertiary text */
+  --faint:  #505c6d;   /* ghost text / grid lines */
 
-  --accent: oklch(0.83 0.13 205);
+  --hairline: rgba(148, 174, 211, 0.13);
+  --hairline-2: rgba(148, 174, 211, 0.18);
+  --hairline-3: rgba(148, 174, 211, 0.25);
 
-  --font: ui-sans-serif, system-ui, "Segoe UI", Inter, "Helvetica Neue", sans-serif;
+  --cyan:   #66d9ff;
+  --cyan-hi:#b9ecff;
+  --purple: #9d8cff;
+  --green:  #6fe7ad;
+  --yellow: #f7c76a;
+  --red:    #ff7e91;
+  --orange: #ff9d5c;
+
+  --accent: var(--cyan);
+
+  --font: system-ui, ui-sans-serif, "Segoe UI", "Helvetica Neue", sans-serif;
+  --font-display: "Chakra Petch", system-ui, ui-sans-serif, sans-serif;
   --mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace;
 
   --mx: 50%;
@@ -47,11 +65,11 @@ body {
 }
 
 /* --- ambient light --------------------------------------------------------- */
-.aurora { position: fixed; inset: 0; z-index: 0; filter: blur(70px); opacity: 0.55; }
+.aurora { position: fixed; inset: 0; z-index: 0; filter: blur(70px); opacity: 0.5; }
 .blob { position: absolute; width: 60vw; height: 60vw; border-radius: 50%; }
-.b1 { left: -18vw; top: -22vw;  background: radial-gradient(circle, oklch(0.55 0.16 210 / 0.55), transparent 65%); animation: drift 34s ease-in-out infinite; }
-.b2 { right: -16vw; top: 10vw;   background: radial-gradient(circle, oklch(0.55 0.18 300 / 0.45), transparent 65%); animation: drift 46s ease-in-out infinite reverse; }
-.b3 { left: 22vw; bottom: -26vw; background: radial-gradient(circle, oklch(0.6 0.14 150 / 0.35), transparent 65%);  animation: drift 58s ease-in-out infinite; }
+.b1 { left: -18vw; top: -22vw;  background: radial-gradient(circle, rgba(102,217,255,0.16), transparent 65%); animation: drift 34s ease-in-out infinite; }
+.b2 { right: -16vw; top: 10vw;   background: radial-gradient(circle, rgba(157,140,255,0.14), transparent 65%); animation: drift 46s ease-in-out infinite reverse; }
+.b3 { left: 22vw; bottom: -26vw; background: radial-gradient(circle, rgba(111,231,173,0.10), transparent 65%);  animation: drift 58s ease-in-out infinite; }
 
 @keyframes drift {
   0%, 100% { transform: translate3d(0, 0, 0) scale(1); }
@@ -59,7 +77,7 @@ body {
 }
 
 .grain {
-  position: fixed; inset: 0; z-index: 1; pointer-events: none; opacity: 0.05; mix-blend-mode: overlay;
+  position: fixed; inset: 0; z-index: 1; pointer-events: none; opacity: 0.04; mix-blend-mode: overlay;
   background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/></filter><rect width='160' height='160' filter='url(%23n)'/></svg>");
 }
 
@@ -68,14 +86,14 @@ body {
   position: relative;
   border-radius: var(--r-lg);
   background:
-    linear-gradient(180deg, oklch(1 0 0 / 0.075), oklch(1 0 0 / 0.022)),
-    oklch(0.21 0.02 262 / 0.55);
-  backdrop-filter: blur(22px) saturate(1.45) brightness(1.06);
+    linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.012)),
+    rgba(22, 28, 39, 0.52);
+  backdrop-filter: blur(22px) saturate(1.4) brightness(1.04);
+  border: 1px solid var(--hairline-2);
   box-shadow:
-    inset 0 1px 0 oklch(1 0 0 / 0.14),
-    inset 0 -22px 44px oklch(0 0 0 / 0.38),
-    0 26px 54px -28px oklch(0 0 0 / 0.65),
-    0 0 46px -12px color-mix(in oklab, var(--glow-c) calc(var(--glow) * 100%), transparent);
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 18px 44px -28px rgba(0, 0, 0, 0.75),
+    0 0 46px -12px color-mix(in srgb, var(--glow-c) calc(var(--glow) * 100%), transparent);
   transition: --glow 600ms cubic-bezier(.2,.8,.2,1), --edge 1s linear, transform 300ms cubic-bezier(.2,.8,.2,1);
 }
 
@@ -84,8 +102,8 @@ body {
   content: "";
   position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
   background:
-    radial-gradient(180px 140px at var(--mx) var(--my), oklch(1 0 0 / 0.13), transparent 62%),
-    linear-gradient(140deg, oklch(1 0 0 / 0.06), transparent 45%);
+    radial-gradient(180px 140px at var(--mx) var(--my), rgba(255, 255, 255, 0.10), transparent 62%),
+    linear-gradient(140deg, rgba(255, 255, 255, 0.05), transparent 45%);
   z-index: 1;
 }
 
@@ -93,13 +111,13 @@ body {
 .glass::after {
   content: "";
   position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
-  padding: 1.2px;
+  padding: 1px;
   background: conic-gradient(from var(--edge),
-    oklch(1 0 0 / 0.06),
-    oklch(0.9 0.05 200 / 0.45),
-    oklch(1 0 0 / 0.10),
-    oklch(0.85 0.08 300 / 0.35),
-    oklch(1 0 0 / 0.06));
+    rgba(148, 174, 211, 0.05),
+    rgba(102, 217, 255, 0.4),
+    rgba(148, 174, 211, 0.10),
+    rgba(157, 140, 255, 0.32),
+    rgba(148, 174, 211, 0.05));
   -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
   mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
   mask-composite: exclude;
@@ -113,7 +131,7 @@ body {
 .sheen {
   position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
   background: linear-gradient(115deg, transparent 35%,
-    oklch(1 0 0 / 0.10) var(--sheen),
+    rgba(255, 255, 255, 0.07) var(--sheen),
     transparent calc(var(--sheen) + 18%));
   animation: sweep 9s cubic-bezier(.4,0,.2,1) infinite;
   z-index: 2;
@@ -128,7 +146,7 @@ body {
 body::after {
   content: "";
   position: fixed; inset: auto 0 0 0; height: 26vh; z-index: 1; pointer-events: none;
-  background: linear-gradient(180deg, oklch(1 0 0 / 0.05), oklch(0.83 0.13 205 / 0.13), transparent);
+  background: linear-gradient(180deg, rgba(102, 217, 255, 0.03), rgba(102, 217, 255, 0.08), transparent);
   filter: blur(34px);
   transform: scaleY(-1);
 }
@@ -136,18 +154,28 @@ body::after {
 /* --- shared bits ----------------------------------------------------------- */
 .panel-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 14px; }
 .panel-head h2 {
-  margin: 0; font-size: 0.86rem; font-weight: 600; letter-spacing: 0.14em;
-  text-transform: uppercase; text-shadow: 0 0 18px oklch(1 0 0 / 0.25);
+  margin: 0; font-family: var(--font-display); font-size: 0.86rem; font-weight: 700;
+  letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-2);
 }
 .hint { margin: 0; font-size: 0.78rem; color: var(--muted); font-family: var(--mono); }
 
 kbd {
   font-family: var(--mono); font-size: 0.72rem; padding: 2px 6px; border-radius: 6px;
-  background: oklch(1 0 0 / 0.08); border: 1px solid var(--line-2);
+  background: rgba(22, 28, 39, 0.8); border: 1px solid var(--hairline-3);
 }
 
+/* panels with no live data: honest, dim, centred */
+.nodata {
+  display: flex; flex-direction: column; gap: 4px; align-items: center; justify-content: center;
+  min-height: 120px; color: var(--faint); font-family: var(--mono); font-size: 0.8rem;
+  border: 1px dashed var(--hairline); border-radius: var(--r-md);
+  background: rgba(22, 28, 39, 0.3);
+}
+.nodata b { color: var(--muted); font-weight: 600; letter-spacing: 0.08em; }
+.nodata span { font-size: 0.72rem; }
+
 /* --- accessibility --------------------------------------------------------- */
-:focus-visible { outline: 2px solid oklch(0.85 0.12 200 / 0.7); outline-offset: 3px; border-radius: 10px; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 10px; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }

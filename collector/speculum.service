@@ -1,0 +1,31 @@
+# Speculum collector — systemd --user unit (aphotic)
+#
+#   install:  cp collector/speculum.service ~/.config/systemd/user/
+#             systemctl --user daemon-reload
+#             systemctl --user enable --now speculum
+#   watch:    journalctl --user -u speculum -f
+#   stop:     systemctl --user stop speculum
+#
+# Binds 127.0.0.1:8792 only. To see it on the tailnet (e.g. from the phone),
+# publish tailnet-only with tailscale serve — never to the LAN or public.
+#
+# CUDA_VISIBLE_DEVICES= keeps the collector's process tree invisible to the
+# GPU: it polls nvidia-smi as a subprocess and never opens a CUDA/NVML
+# context itself (the GPU belongs to llama-swap).
+
+[Unit]
+Description=Speculum local LLM runtime monitor (loopback :8792)
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 %h/test/glass-monitor/collector/speculum.py --port 8792
+Restart=on-failure
+RestartSec=3
+Environment=CUDA_VISIBLE_DEVICES=
+# hard ceiling: the collector is a thin poller + ring buffers, not an app server
+MemoryMax=64M
+CPUWeight=50
+Nice=10
+
+[Install]
+WantedBy=default.target
