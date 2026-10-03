@@ -706,7 +706,9 @@ html[data-ripple="on"] .panel.is-rippling::after {
 }
 @media (max-width: 768px) {
   .kpi-groups { grid-template-columns: 1fr; }
-  .kpi-group { padding-top: var(--sp-1); }
+  /* one column: no neighbour to line tiles up with, so drop the fixed
+     3-row grid (it left an empty row under 2-tile groups) */
+  .kpi-group { padding-top: var(--sp-1); grid-template-rows: none; }
   .readout-grid { grid-template-columns: 1fr; }
   .ctx-row { grid-template-columns: minmax(64px, 90px) minmax(0, 1fr) auto; }
   .ctx-row .ctx-engine { display: none; }
