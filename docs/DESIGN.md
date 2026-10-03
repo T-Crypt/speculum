@@ -188,3 +188,25 @@ anything that loads a model.
 3. UI: Basic and Advanced, gap-free grid, engine cards, alerts, timeline, range from the database.
 4. Windows host backend, `install.sh`, `install.ps1`.
 5. README rewrite, preview placeholder, network section; later features 4 to 8 above.
+
+## Handoff (2026-10-03, for the next session)
+
+**Phase 1 state:** `collector/engines.py` exists (adapters, written by NInfer `coder`, compiles, NOT reviewed,
+NOT wired into `speculum.py`). Still to do for Phase 1: review engines.py against section 1, `collector/config.py`
+(speculum.toml loader), `speculum.example.toml`, discovery, the single scheduler thread, wiring in `main()`,
+`collector/test_engines.py`, then a live check (Ollama on 11434 must appear as an engine card; RSS < 55 MB).
+
+**Operator asks, verbatim intent - all must land somewhere in Phases 1-5:**
+- Users add their own engines easily (config, no code). Engines list reads like: llama-swap, NInfer, Strata,
+  Ollama x5, llama.cpp, vLLM, LM Studio, Unsloth servers, any OpenAI-compatible. llama-swap is its own engine.
+- Scale to many engines across the network ("anything on the network combed and placed here").
+- Fill the blank black space between modules; the current look and feel stays.
+- Lightweight above all: safe to idle in the background; review the whole repo for weight.
+- Rich log data; history kept 30 / 60 / 90 days with estimated DB size shown.
+- Basic and Advanced views, toggled in the top bar.
+- Windows support. Dumb-simple install (an Ollama user who just wants stats on 127.0.0.1).
+- Maybe a second hat later: a small-scale inference hoster's dashboard.
+- README.md: run the stop-slop pass on it, leave a placeholder for the operator's preview image, and a
+  "Network support - coming soon" section (Proxmox LXC hub + lightweight node connector, section 6 above).
+- Creative freedom: add features that provide valuable information and fit the minimal bones.
+- Delegation: NInfer roles (`coder`, `agent`) do the work; Claude reviews, verifies live, commits.
