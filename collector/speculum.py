@@ -164,6 +164,16 @@ def push_event(level, msg, ts=None):
 def add_request(rec):
     """Append one request record (newest first). Dedupe by id if present."""
     with lock:
+        # The same request arrives from llama-swap activity and from the NInfer log:
+        # merge on (prompt, output) within 120 s, filling fields the other source lacks.
+        if rec.get("prompt") is not None and rec.get("output") is not None:
+            for old in S.requests:
+                if (old.get("prompt") == rec["prompt"] and old.get("output") == rec["output"]
+                        and abs((old.get("t") or 0) - (rec.get("t") or 0)) < 120):
+                    for k, v in rec.items():
+                        if v is not None and old.get(k) is None:
+                            old[k] = v
+                    return False
         if "id" in rec:
             seen = S._req_seen
             if rec["id"] in seen:
@@ -614,11 +624,22 @@ def parse_dur(s):
     return v
 
 
+LOG_TS_RE = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\.(\d+)")
+
+
 def log_line(line, e):
     m = REQ_RE.search(line)
     if m and e is not None and e.get("origin") == "ninfer":
         rid = int(m.group(1))
-        rec = {"id": "req#%d" % rid, "t": now(), "model": e.get("label"),
+        lt = LOG_TS_RE.match(line)
+        t = now()
+        if lt:
+            try:
+                t = time.mktime(time.strptime(lt.group(1), "%Y-%m-%d %H:%M:%S")) + float("0." + lt.group(2))
+            except ValueError:
+                pass
+        # req# restarts at 1 on every NInfer load, so the log timestamp is part of the id
+        rec = {"id": "req#%d@%d" % (rid, int(t)), "t": t, "model": e.get("label"),
                "origin": "ninfer", "prompt": None, "cache": None, "fresh": None,
                "output": None, "cache_pct": None, "total_s": None, "ttft_s": None,
                "queue_s": None, "prefill_tps": None, "decode_tps": None,
