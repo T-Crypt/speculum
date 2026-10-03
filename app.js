@@ -8,7 +8,7 @@
 
 import {
   prefs, cssVar, invalidateStyleCache, seriesColor, motionReduced,
-  fmtTok, fmtNum, fmtDur, clockStr, upStr, decodeEscapes, deltaText,
+  fmtTok, fmtNum, fmtDur, clockStr, upStr, decodeEscapes, deltaText, hexToRgba,
   el, Panel, StaleChip, Stat, Meter, sparkCanvas, paintSpark,
   Badge, StatusPill, DataTable, TableRow, EmptyState, Skeleton,
   Chips, Segmented, Menu,
@@ -92,6 +92,10 @@ const KPI_SPECS = {
   mtp:      { label: 'MTP accept',     unit: '%',     fmt: v => v.toFixed(1), diff: d => d.toFixed(1) + 'pt' },
   vram:     { label: 'VRAM',           unit: 'GB',    fmt: v => v.toFixed(1), diff: d => d.toFixed(1) },
 };
+/* latency KPIs read 0 (or null) when the engine is idle — no requests to
+   measure — which must display as a muted "—", never cross a "low" threshold
+   into red */
+const IDLE_ZERO = new Set(['ttft', 'p95', 'tpot']);
 /* value 15 min (900 s @ 1 Hz) back in a KPI history, or null when unknown */
 function histPrev15m(hist) {
   if (!Array.isArray(hist) || hist.length < 2) return null;
@@ -567,7 +571,9 @@ function buildKpi() {
     for (const k of KPI_KEYS) {
       const stt = refs[k], spec = KPI_SPECS[k];
       const v = st.kpi ? st.kpi[k] : null;
-      const has = v != null && isFinite(v);
+      let has = v != null && isFinite(v);
+      const idle = has && IDLE_ZERO.has(k) && v === 0;   // idle: show "—", not red
+      if (idle) has = false;
       const vargs = [has ? spec.fmt(v) : '—'];
       if (stt._unitSpan) vargs.push(stt._unitSpan);
       stt.value.replaceChildren(...vargs);
@@ -575,7 +581,9 @@ function buildKpi() {
         ? { total: (st.kpi && st.kpi.vram_total) || (st.gpu && st.gpu.vramTotal) || 0 }
         : {};
       const s2 = kpiStatus(k, has ? v : null, extra);
-      if (s2) stt.value.dataset.status = s2; else stt.value.removeAttribute('data-status');
+      if (s2) stt.value.dataset.status = s2;
+      else if (idle) stt.value.dataset.status = 'idle';
+      else stt.value.removeAttribute('data-status');
       const prev = histPrev15m(st.kpiHist && st.kpiHist[k]);
       stt.delta.textContent = has ? (deltaText(v, prev, spec.diff, 'vs 15m') || '') : '';
       paintSpark(stt.spark, (st.kpiHist && st.kpiHist[k]) || [],
@@ -608,8 +616,44 @@ function niceTicks(max, n = 4) {
   for (let v = 0; v <= top + step * 1e-6; v += step) out.push(v);
   return out;
 }
+/* EMA over the 1 s throughput samples: 8 s time constant
+   (alpha = 1 - e^(-1/8) per sample). A paint-time projection — the raw
+   history in state.engHist is never modified, the tooltip still reads it. */
+function emaSmooth(data, alpha = 1 - Math.exp(-1 / 8)) {
+  const out = new Array(data.length);
+  let s = null;
+  for (let i = 0; i < data.length; i++) {
+    const v = data[i];
+    if (v == null || !isFinite(v)) { out[i] = null; continue; }
+    s = s == null ? v : s + alpha * (v - s);
+    out[i] = s;
+  }
+  return out;
+}
+/* contiguous runs of finite values (gaps break a run) → [[i, v], …] per run */
+function runsOf(arr) {
+  const runs = [];
+  let cur = null;
+  for (let i = 0; i < arr.length; i++) {
+    const v = arr[i];
+    if (v == null || !isFinite(v)) { if (cur) { cur = null; } continue; }
+    if (!cur) { cur = []; runs.push(cur); }
+    cur.push([i, v]);
+  }
+  return runs;
+}
+/* x-axis labels relative to now: minutes for the 15 m / 1 h ranges
+   ("-15m" "-10m" "-5m" "now", "-60m" … "now"), hours for 6 h / 24 h */
+function tpXTicks(sec) {
+  const n = sec <= 900 ? 3 : 4;
+  const step = sec / n;
+  const unit = s => (s >= 3600 ? `${s / 3600}h` : `${Math.round(s / 60)}m`);
+  const out = [];
+  for (let i = 0; i <= n; i++) out.push({ frac: i / n, label: i === n ? 'now' : '−' + unit((n - i) * step) });
+  return out;
+}
 function buildThroughput() {
-  const p = makePanel('p-throughput', 'Throughput', 'decode tok/s per engine · 1 s resolution', {
+  const p = makePanel('p-throughput', 'Throughput', 'decode tok/s per engine · 1 s samples, 8 s smoothed', {
     tools: el('span', { class: 'tp-tools' },
       Segmented(TP_RANGES.map(r => ({ value: r.value, label: r.label })), '1h', v => {
         tp.range = v; tp.legendDirty = true;
@@ -653,8 +697,9 @@ function buildThroughput() {
     for (const e of reg.list) {
       const full = st.engHist[e.key] || [];
       const data = full.slice(-R.sec);
-      for (const v of data) if (isFinite(v) && v > max) max = v;
-      series.push({ e, data, color: seriesColor(reg.byKey.get(e.key).colorIndex) });
+      const sm = emaSmooth(full).slice(-R.sec);
+      for (const v of sm) if (isFinite(v) && v > max) max = v;
+      series.push({ e, data, sm, color: seriesColor(reg.byKey.get(e.key).colorIndex) });
     }
     const ticks = niceTicks(Math.max(max, 1));
     const yMax = ticks[ticks.length - 1];
@@ -671,30 +716,62 @@ function buildThroughput() {
       ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(pad.l + iw, y); ctx.stroke();
       ctx.textAlign = 'right'; ctx.fillText(fmtTok(tv), pad.l - 5, y + 3);
     }
+    /* vertical gridlines at the relative-time ticks, then the baseline */
+    const xticks = tpXTicks(R.sec);
+    for (const t of xticks) {
+      if (t.frac === 0 || t.frac === 1) continue;
+      const x = pad.l + t.frac * iw;
+      ctx.strokeStyle = cssVar('--border');
+      ctx.beginPath(); ctx.moveTo(x, pad.t); ctx.lineTo(x, pad.t + ih); ctx.stroke();
+    }
     ctx.strokeStyle = cssVar('--border-strong');
     ctx.beginPath(); ctx.moveTo(pad.l, pad.t + ih); ctx.lineTo(pad.l + iw, pad.t + ih); ctx.stroke();
+    /* area fills: gradient .30 → 0 in the series colour, flat when the stub
+       context cannot parse hex / build gradients (same rule as paintSpark) */
+    const base = pad.t + ih;
     for (const s of series) {
-      const n = s.data.length;
-      if (n < 2) continue;
-      ctx.strokeStyle = s.color;
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      let started = false;
-      for (let i = 0; i < n; i++) {
-        const v = s.data[i];
-        if (v == null || !isFinite(v)) { started = false; continue; }
-        const x = xAt(i, n), y = yAt(v);
-        started ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
-        started = true;
+      for (const run of runsOf(s.sm)) {
+        if (run.length < 2) continue;
+        const grad = hexToRgba(s.color) && typeof ctx.createLinearGradient === 'function'
+          ? ctx.createLinearGradient(0, pad.t, 0, base) : null;
+        if (grad) {
+          grad.addColorStop(0, hexToRgba(s.color, 0.3));
+          grad.addColorStop(1, hexToRgba(s.color, 0));
+          ctx.fillStyle = grad;
+        } else { ctx.globalAlpha = 0.3; ctx.fillStyle = s.color; }
+        ctx.beginPath();
+        ctx.moveTo(xAt(run[0][0], s.sm.length), base);
+        for (const [i, v] of run) ctx.lineTo(xAt(i, s.sm.length), yAt(v));
+        ctx.lineTo(xAt(run[run.length - 1][0], s.sm.length), base);
+        ctx.closePath();
+        ctx.fill();
+        ctx.globalAlpha = 1;
       }
-      ctx.stroke();
     }
-    /* x-axis time labels: start / end of the drawn window */
-    ctx.fillStyle = cssVar('--text-3');
-    ctx.textAlign = 'left';
-    ctx.fillText('−' + fmtDur(R.sec * 1000), pad.l, h - 5);
-    ctx.textAlign = 'right';
-    ctx.fillText('now', pad.l + iw, h - 5);
+    for (const s of series) {
+      ctx.strokeStyle = s.color;
+      ctx.lineWidth = 2;
+      ctx.lineJoin = 'round';
+      ctx.shadowColor = s.color;
+      ctx.shadowBlur = 8;
+      for (const run of runsOf(s.sm)) {
+        if (run.length < 2) continue;
+        ctx.beginPath();
+        run.forEach(([i, v], j) => {
+          const x = xAt(i, s.sm.length), y = yAt(v);
+          j === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+      }
+      ctx.shadowBlur = 0;
+    }
+    /* x-axis time labels: relative minutes/hours for the selected range */
+    for (const t of xticks) {
+      const x = pad.l + t.frac * iw;
+      ctx.fillStyle = cssVar('--text-3');
+      ctx.textAlign = t.frac === 0 ? 'left' : t.frac === 1 ? 'right' : 'center';
+      ctx.fillText(t.label, x, h - 5);
+    }
     /* crosshair + tooltip rebuilt from last-paint geometry */
     tp.geo = { pad, iw, ih, R, series, yMax, w, h, xAt, yAt };
     if (tp.hoverX != null) {
@@ -792,10 +869,10 @@ function buildGpu() {
 function buildLedger() {
   const p = makePanel('p-ledger', 'Token ledger', 'prompt + generated tokens by window', { flush: true });
   const dt = DataTable({ columns: [
-    { label: 'Window', width: '96px' },
+    { label: 'Window', width: '128px' },
     { label: 'Last hour', num: true },
     { label: 'Last 24 h', num: true },
-    { label: 'Since start', num: true },
+    { label: 'Since engine load', num: true },
   ], caption: 'Token ledger' });
   const foot = el('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '4px 16px' } });
   const mkStat = label => {
@@ -808,7 +885,8 @@ function buildLedger() {
   const notes = el('div');
   p.body.append(dt.wrap, foot, notes);
   const ROWS = ['generated', 'fresh', 'cached'];
-  const LABEL = { generated: 'Generated', fresh: 'Fresh (prompt − cache)', cached: 'Cached (reused)' };
+  /* short labels: the label column is fixed-width and must not wrap */
+  const LABEL = { generated: 'Generated', fresh: 'Fresh prefill', cached: 'Cached' };
   p.render = st => {
     const L = tokenLedger(st);
     const cells = (row, cls) => [
@@ -849,19 +927,58 @@ function sig4(L) {
   return L.cols.map(c => `${c.generated ?? '-'}|${c.fresh ?? '-'}|${c.cached ?? '-'}`).join(';');
 }
 
-/* --- P5 · Context usage --------------------------------------------------------------- */
-/* one row per live session (cap 20 + "…N more"): mono id, engine badge,
-   used / window, 10 px meter with 0.75 / 0.90 threshold ticks. */
+/* --- P5 · Context residency ----------------------------------------------------------- */
+/* stacked residency columns for the last 40 requests (oldest left, newest
+   right): cached (green) + fresh prefill (orange) + generated (cyan), scaled
+   to the max model window of the set — dashed line at the window (label from
+   the data), faint line at 75 %. Hover column → prompt/cached/fresh/output/
+   TTFT tooltip. One-line legend (layer key + 15-min re-ingest tax + cache
+   hit), then the live per-session bars (cap 20 + "…N more"): mono id,
+   engine badge, used / window, 10 px meter with 0.75 / 0.90 ticks. */
+const RESID_N = 40;
 function buildContext() {
-  const p = makePanel('p-context', 'Context usage', 'live sessions vs model window');
+  const p = makePanel('p-context', 'Context residency', 'last 40 requests vs model window · live sessions');
+  const wrap = el('div', { class: 'ctx-wrap' });
+  const canvas = el('canvas', { class: 'ctx-canvas', 'aria-label': 'Token residency of the last 40 requests' });
+  const tip = el('div', { class: 'tp-tip', hidden: true });
+  wrap.append(canvas, tip);
+  const legend = el('div', { class: 'ctx-legend', 'aria-label': 'Residency legend' });
   const list = el('div', { class: 'ctx-list' });
   const more = el('p', { class: 'ledger-note', hidden: true });
   const empty = EmptyState('No active sessions');
-  p.body.append(list, more, empty);
+  p.body.append(wrap, legend, list, more, empty);
+  const cx = { cols: [], hoverIdx: null, hoverX: null, geo: null };
+  canvas.addEventListener('mousemove', e => {
+    const r = canvas.getBoundingClientRect();
+    cx.hoverX = Math.max(0, Math.min(r.width, e.clientX - r.left));
+  });
+  canvas.addEventListener('mouseleave', () => { cx.hoverX = null; tip.hidden = true; });
   const CTX_MAX = 20;
   p.render = st => {
     const sessions = st.sessions || [];
-    empty.hidden = sessions.length > 0;
+    /* residency columns: last 40 requests, oldest left, newest right */
+    const raw = (st.requests || []).slice(0, RESID_N).slice().reverse();
+    cx.cols = raw.map(r => {
+      const prompt = Math.max(0, r.prompt || 0);
+      const cached = Math.min(prompt, r.cache || 0);
+      const fresh = Math.min(prompt - cached, Math.max(0, r.fresh != null ? r.fresh : prompt - cached));
+      return {
+        model: r.model || r.id || '—', t: r.t, prompt, cached, fresh,
+        output: Math.max(0, r.output || 0), ttft: r.ttft_s, window: r.window || 0,
+      };
+    });
+    /* one-line legend: layer key + 15-min re-ingest tax + cache hit */
+    const pct = v => (v == null || !isFinite(v)) ? '—' : fmtNum(v, 1) + '%';
+    const re = st.kpi ? st.kpi.reingest : null;
+    const ca = st.kpi ? st.kpi.cache : null;
+    legend.replaceChildren(
+      el('span', { class: 'swatch', style: { background: 'var(--tok-cached)' } }), 'Cached',
+      el('span', { class: 'swatch', style: { background: 'var(--tok-fresh)' } }), 'Fresh prefill',
+      el('span', { class: 'swatch', style: { background: 'var(--tok-generated)' } }), 'Generated',
+      el('span', { class: 'spacer' }),
+      el('span', { class: 'head-stat' }, 'Re-ingest 15m', el('b', {}, pct(re))),
+      el('span', { class: 'head-stat' }, 'Cache hit', el('b', {}, pct(ca))));
+    empty.hidden = sessions.length > 0 || cx.cols.length > 0;
     const reg = buildEngineRegistry(st.engines);
     const show = sessions.slice(0, CTX_MAX);
     const rows = show.map(s => {
@@ -889,12 +1006,106 @@ function buildContext() {
     const n = sessions.length;
     more.textContent = n > CTX_MAX ? `…${n - CTX_MAX} more` : '';
     more.hidden = n <= CTX_MAX;
-    return sessions.map(s => s.id + s.engineKey).join(',');
+    return cx.cols.length + ':' + sessions.map(s => s.id + s.engineKey).join(',');
   };
-  /* ripple pulses on structural change (sessions appearing / leaving), not on
-     the per-second used-token jitter */
+  /* stacked residency columns, painted on the 5 Hz paint loop */
+  p.paint = () => {
+    const { ctx, w, h } = fit(canvas);
+    ctx.clearRect(0, 0, w, h);
+    const cols = cx.cols;
+    ctx.font = `10px ${cssVar('--font-mono')}`;
+    if (!cols.length) {
+      ctx.fillStyle = cssVar('--text-3');
+      ctx.textAlign = 'center';
+      ctx.fillText('no data', w / 2, h / 2 + 4);
+      tip.hidden = true;
+      return null;
+    }
+    const pad = { l: 46, r: 8, t: 16, b: 8 };
+    const iw = w - pad.l - pad.r, ih = h - pad.t - pad.b;
+    let maxWin = 0;
+    for (const c of cols) if (c.window > maxWin) maxWin = c.window;
+    if (!(maxWin > 0)) maxWin = 1;
+    const yAt = tok => pad.t + ih - (Math.min(tok, maxWin) / maxWin) * ih;
+    const base = pad.t + ih;
+    /* faint 50 % gridline + the 75 % (warn) line */
+    ctx.strokeStyle = cssVar('--border');
+    ctx.lineWidth = 1;
+    for (const f of [0.5, 0.75]) {
+      const y = pad.t + ih - f * ih;
+      ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(pad.l + iw, y); ctx.stroke();
+    }
+    ctx.fillStyle = cssVar('--text-3');
+    ctx.textAlign = 'right';
+    ctx.fillText(fmtTok(Math.round(0.5 * maxWin)), pad.l - 5, yAt(0.5 * maxWin) + 3);
+    ctx.fillText('0', pad.l - 5, base + 3);
+    ctx.strokeStyle = cssVar('--border-strong');
+    ctx.beginPath(); ctx.moveTo(pad.l, base); ctx.lineTo(pad.l + iw, base); ctx.stroke();
+    /* the columns */
+    const n = cols.length;
+    const cw = iw / n;
+    const bw = Math.max(1, Math.floor(cw * 0.72));
+    const LAYERS = [
+      ['cached', '--tok-cached'],
+      ['fresh', '--tok-fresh'],
+      ['output', '--tok-generated'],
+    ];
+    cx.geo = { pad, iw, ih, base, n, cw, bw, yAt, maxWin };
+    for (let i = 0; i < n; i++) {
+      const c = cols[i];
+      const x0 = pad.l + i * cw + (cw - bw) / 2;
+      let y = base;
+      for (const [key, tokVar] of LAYERS) {
+        const v = c[key] || 0;
+        if (v <= 0) continue;
+        const hh = Math.min(base - pad.t, (v / maxWin) * ih);
+        y -= hh;
+        ctx.fillStyle = cssVar(tokVar);
+        ctx.fillRect(x0, y, bw, hh);
+      }
+    }
+    /* dashed line at the model window (the scale max), labelled from data */
+    const yW = yAt(maxWin);
+    ctx.strokeStyle = cssVar('--border-strong');
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath(); ctx.moveTo(pad.l, yW); ctx.lineTo(pad.l + iw, yW); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = cssVar('--text-2');
+    ctx.textAlign = 'right';
+    ctx.fillText(fmtTok(maxWin) + ' window', pad.l + iw, yW - 4);
+    /* hover crosshair + tooltip (rebuilt from last-paint geometry) */
+    let hover = null;
+    if (cx.hoverX != null && iw > 0) {
+      const gx = Math.max(pad.l, Math.min(pad.l + iw, cx.hoverX));
+      const i = Math.max(0, Math.min(n - 1, Math.floor((gx - pad.l) / cw)));
+      hover = i;
+      ctx.strokeStyle = cssVar('--border-strong');
+      ctx.beginPath();
+      ctx.moveTo(pad.l + i * cw + 0.5, pad.t);
+      ctx.lineTo(pad.l + i * cw + 0.5, base);
+      ctx.stroke();
+      const c = cols[i];
+      const line = (k, v) => `<span class="row">${k}<b>${v}</b></span>`;
+      tip.innerHTML =
+        `<span class="t">${c.model} · ${clockStr(c.t)}</span>` +
+        line('prompt', fmtTok(c.prompt)) +
+        line('cached', fmtTok(c.cached)) +
+        line('fresh', fmtTok(c.fresh)) +
+        line('output', fmtTok(c.output)) +
+        line('TTFT', fmtDur(c.ttft != null ? c.ttft * 1000 : null));
+      tip.hidden = false;
+      const left = gx + 14 + 150 > w ? Math.max(4, gx - 15 - 150) : gx + 14;
+      tip.style.left = left + 'px';
+    } else {
+      tip.hidden = true;
+    }
+    return cx.cols.length + ':' + (hover ?? '-') + ':' + cx.cols[cx.cols.length - 1].prompt;
+  };
+  /* ripple pulses on structural change (sessions appearing / leaving or a new
+     request landing), not on the per-second used-token jitter */
   p.onData = st => {
-    const sig = (st.sessions || []).map(s => s.id + s.engineKey).join(',');
+    const sig = (st.sessions || []).map(s => s.id + s.engineKey).join(',') +
+      '#' + ((st.requests && st.requests[0] && st.requests[0].id) || 0);
     panelPulse(p, sig);
   };
 }

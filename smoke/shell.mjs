@@ -76,9 +76,11 @@ class FakeEl {
   getContext() {
     return {
       setTransform() {}, clearRect() {}, beginPath() {}, moveTo() {}, lineTo() {},
-      closePath() {}, stroke() {}, fill() {}, fillText() {},
+      closePath() {}, stroke() {}, fill() {}, fillText() {}, fillRect() {},
+      setLineDash() {}, createLinearGradient: () => ({ addColorStop() {} }),
       fillStyle: '', strokeStyle: '', font: '', textAlign: '',
-      lineWidth: 1, lineJoin: '', globalAlpha: 1,
+      lineWidth: 1, lineJoin: '', lineCap: '', globalAlpha: 1,
+      shadowColor: '', shadowBlur: 0,
     };
   }
   querySelector() { return null; }
@@ -247,7 +249,7 @@ ok(O({ mode: 'boot' }).state === 'paused', 'Booting state');
 ok(O({ mode: 'live', paused: true }).state === 'paused', 'Paused state');
 ok(O({ mode: 'live', alerts: [], engines: [{ up: true, latched: false }] }).state === 'live', 'Live state');
 ok(O({ mode: 'live', alerts: ['x'], engines: [] }).state === 'degraded', 'Degraded on alert');
-ok(O({ mode: 'live', alerts: [], engines: [{ up: false, latched: false }] }).state === 'degraded', 'Degraded on stopped engine');
+ok(O({ mode: 'live', alerts: [], engines: [{ up: false, latched: false }] }).state === 'live', 'Stopped (not latched) engine is normal — live');
 ok(O({ mode: 'live', alerts: [], engines: [{ up: true, latched: true }] }).state === 'degraded', 'Degraded on latched engine');
 ok(O({ mode: 'demo', alerts: [], engines: [{ up: true, latched: false }] }).state === 'live', 'Demo counts as live');
 

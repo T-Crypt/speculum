@@ -9,17 +9,22 @@
 .deck {
   display: grid;
   grid-template-columns: repeat(12, minmax(0, 1fr));
+  /* dense: backfill the Context panel into the slot beside Throughput even
+     though GPU & host comes first in the DOM (and the ledger beside GPU) */
+  grid-auto-flow: dense;
   gap: var(--sp-3);
   width: min(1720px, 100%);
   margin: 0 auto;
   padding: var(--sp-3) 24px var(--sp-5);
 }
 
-/* section shells (filled by panel modules in app.js) */
+/* section shells (filled by panel modules in app.js). Context residency is
+   the signature panel: it sits next to Throughput on the top row, and GPU &
+   host moved down beside the token ledger. */
 .g-kpi        { grid-column: 1 / -1; }
 .g-throughput { grid-column: 1 / 8; }
-.g-gpu        { grid-column: 8 / 13; }
-.g-context    { grid-column: 1 / 7; }
+.g-context    { grid-column: 8 / 13; }
+.g-gpu        { grid-column: 1 / 7; }
 .g-ledger     { grid-column: 7 / 13; }
 .g-requests   { grid-column: 1 / -1; }
 .g-events     { grid-column: 1 / 8; }
@@ -109,13 +114,15 @@
 /* 1440 px: the deck is still full-width here (cap 1720) — only KPI spacing
    tightens (components.css); the grid stays 12 columns */
 @media (max-width: 1024px) {
+  /* (grid-auto-flow: dense from the base rule keeps GPU + ledger packed
+     beside each other when the full-width Context panel skips their row) */
   .deck { grid-template-columns: repeat(6, minmax(0, 1fr)); }
   .g-throughput,
-  .g-gpu,
+  .g-context,   /* signature panel keeps the full row at 6 columns */
   .g-events,
   .g-pool { grid-column: 1 / 7; }
-  .g-context { grid-column: 1 / 4; }
-  .g-ledger  { grid-column: 4 / 7; }
+  .g-gpu    { grid-column: 1 / 4; }
+  .g-ledger { grid-column: 4 / 7; }
 }
 
 @media (max-width: 768px) {

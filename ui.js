@@ -253,7 +253,7 @@ export function paintSpark(canvas, data, color) {
   ctx.globalAlpha = 1;
 }
 /* '#rgb' / '#rrggbb' → 'rgba(r, g, b, a)'; null when unparseable */
-function hexToRgba(hex, a) {
+export function hexToRgba(hex, a) {
   const m = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.exec(hex || '');
   if (!m) return null;
   let h = m[1];

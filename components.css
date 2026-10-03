@@ -520,7 +520,12 @@ html[data-ripple="on"] .panel.is-rippling::after {
 /* KPI strip: dense group columns, each a 2px top accent bar in its tone
    (tone 1-4 = series palette: cyan / purple / green / yellow) */
 .kpi-groups { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--sp-4); }
-.kpi-group { position: relative; display: grid; gap: var(--sp-2); min-width: 0; }
+/* fixed row grid: label row + three 1fr tile rows, so tile N lines up
+   across all four groups even though they hold 2 or 3 tiles */
+.kpi-group {
+  position: relative; display: grid; gap: var(--sp-2); min-width: 0;
+  grid-template-rows: auto 1fr 1fr 1fr;
+}
 .kpi-group::before {
   content: "";
   position: absolute;
@@ -541,10 +546,13 @@ html[data-ripple="on"] .panel.is-rippling::after {
   text-transform: uppercase;
   color: var(--gcol, var(--text-2));
 }
-/* tile values sit in the group tone; threshold status wins over tone */
+/* tile values sit in the group tone; threshold status wins over tone.
+   data-status="idle" = the engine is not serving (0 for a latency KPI):
+   muted, never red */
 .kpi-group .stat-value { color: var(--gcol, var(--text-1)); }
 .kpi-group .stat-value[data-status="warn"] { color: var(--warn); }
 .kpi-group .stat-value[data-status="crit"] { color: var(--crit); }
+.kpi-group .stat-value[data-status="idle"] { color: var(--text-3); }
 .kpi-group .stat-spark { height: 28px; }
 
 /* Throughput */
@@ -585,7 +593,17 @@ html[data-ripple="on"] .panel.is-rippling::after {
 }
 .readout b.na { color: var(--text-3); font-weight: 400; }
 
-/* Context usage */
+/* Context residency */
+/* stacked request columns: cached (green) + fresh prefill (orange) +
+   generated (cyan), scaled to the max model window of the set */
+.ctx-wrap { position: relative; }
+.ctx-canvas { width: 100%; height: 300px; display: block; }
+.ctx-legend {
+  display: flex; align-items: center; gap: 4px 10px; flex-wrap: wrap;
+  font-size: var(--fs-meta); color: var(--text-3);
+}
+.ctx-legend .swatch { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+.ctx-legend > .spacer { flex: 1; }
 .ctx-list { display: grid; gap: var(--sp-2); max-height: 400px; overflow-y: auto; padding-right: 2px; }
 .ctx-row {
   display: grid;
@@ -600,6 +618,9 @@ html[data-ripple="on"] .panel.is-rippling::after {
 .ctx-row .meter { height: 10px; }
 
 /* Token ledger */
+/* label column (Generated / Fresh prefill / Cached) must not wrap */
+.p-ledger .data-table th:first-child,
+.p-ledger .data-table td:first-child { white-space: nowrap; }
 .mix { display: flex; height: 10px; border-radius: 3px; overflow: hidden; border: 1px solid var(--border); background: var(--surface-2); }
 .mix i { display: block; height: 100%; }
 .ledger-note { font-size: var(--fs-meta); color: var(--text-3); margin: 0; }
@@ -626,6 +647,18 @@ html[data-ripple="on"] .panel.is-rippling::after {
 .ec-stat b { font-family: var(--font-mono); font-size: var(--fs-label); font-weight: 600; color: var(--text-1); font-variant-numeric: tabular-nums; }
 
 /* Events */
+/* the page's scroll containers: thin, tone-matched scrollbars instead of the
+   platform's fat default bar */
+.ev-wrap, .ctx-list, .pool-grid {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+.ev-wrap::-webkit-scrollbar, .ctx-list::-webkit-scrollbar,
+.pool-grid::-webkit-scrollbar { width: 8px; height: 8px; }
+.ev-wrap::-webkit-scrollbar-thumb, .ctx-list::-webkit-scrollbar-thumb,
+.pool-grid::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 4px; }
+.ev-wrap::-webkit-scrollbar-track, .ctx-list::-webkit-scrollbar-track,
+.pool-grid::-webkit-scrollbar-track { background: transparent; }
 .ev-wrap { max-height: 420px; overflow-y: auto; }
 .ev-filter {
   font-family: inherit;

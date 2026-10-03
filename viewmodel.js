@@ -36,15 +36,16 @@ export function engineBadgeStatus(e) {
 }
 
 /* --- overall state (top-bar pill) -------------------------------------------- */
-/* Live: feed flowing, no alerts, no engine down/latched.
-   Degraded: any alert, or any known engine stopped/latched.
-   Offline: feed not flowing. Demo counts as live. Booting/paused are
-   transient UI states. */
+/* Live: feed flowing, no alerts, no engine latched/erroring. An engine that
+   is simply not running (hand-started, or stopped) is normal operation, not
+   a fault — the engine cards say so in words. Degraded: any alert, or any
+   engine latched (unresponsive). Offline: feed not flowing. Demo counts as
+   live. Booting/paused are transient UI states. */
 export function overallState({ mode, paused = false, alerts = [], engines = [] }) {
   if (mode === 'offline') return { state: 'offline', word: 'Offline' };
   if (mode === 'boot') return { state: 'paused', word: 'Booting' };
   if (paused) return { state: 'paused', word: 'Paused' };
-  const bad = alerts.length > 0 || engines.some(e => e.latched || e.up === false);
+  const bad = alerts.length > 0 || engines.some(e => e.latched);
   return bad ? { state: 'degraded', word: 'Degraded' } : { state: 'live', word: 'Live' };
 }
 
@@ -78,7 +79,8 @@ export function tokenLedger(state, nowS = null, { bufferCap = 500 } = {}) {
     return { generated, fresh, cached, reqs: n };
   };
 
-  /* since-start from engine counters (since the backend started counting) */
+  /* since engine load from the engine token counters (counted since the
+     engine process started, not since the collector started) */
   let sGen = 0, sPrompt = 0, sCached = 0, hasCounters = false;
   for (const e of Array.isArray(state.engines) ? state.engines : []) {
     const C = (e && e.counters) || null;
@@ -119,14 +121,14 @@ export function tokenLedger(state, nowS = null, { bufferCap = 500 } = {}) {
   const notes = [];
   if (reqs.length >= bufferCap) notes.push(`request buffer is capped at ${bufferCap} — window sums cover the newest requests only`);
   if (reqs.length === 0) notes.push('no requests recorded yet');
-  if (!hasCounters) notes.push('since-start totals unavailable — no engine exposes token counters');
+  if (!hasCounters) notes.push('engine-load totals unavailable — no engine exposes token counters');
 
   return {
     now,
     cols: [
       { key: '1h', label: 'Last hour', ...win(3600) },
       { key: '24h', label: 'Last 24 h', ...win(86400) },
-      { key: 'since', label: 'Since start', ...since },
+      { key: 'since', label: 'Since engine load', ...since },
     ],
     footer,
     notes,
