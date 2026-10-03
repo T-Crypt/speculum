@@ -126,7 +126,14 @@
 }
 
 @media (max-width: 768px) {
-  .deck { grid-template-columns: 1fr; padding: var(--sp-2) var(--sp-3) var(--sp-4); }
+  /* minmax(0, 1fr), not 1fr: a bare 1fr track never shrinks below its widest
+     table, which pushed the whole deck to ~535 px on a 390 px phone */
+  .deck { grid-template-columns: minmax(0, 1fr); padding: var(--sp-2) var(--sp-3) var(--sp-4); }
+  /* wide tables scroll inside their panel instead of the page scrolling */
+  .table-wrap { overflow-x: auto; overscroll-behavior-x: contain; }
+  /* the status cluster swipes sideways rather than running off the bar */
+  .topbar .cluster { overflow-x: auto; scrollbar-width: none; }
+  .topbar .cluster::-webkit-scrollbar { display: none; }
   .g-kpi, .g-throughput, .g-gpu, .g-context, .g-ledger,
   .g-requests, .g-engines, .g-events, .g-pool { grid-column: 1 / -1; }
   .g-engines { grid-template-columns: 1fr; }
