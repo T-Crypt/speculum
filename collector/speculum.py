@@ -36,12 +36,14 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import config as spec_config
 import engines
+import history
 
 ROOT = Path(__file__).resolve().parent.parent
 HOST = "127.0.0.1"
@@ -80,6 +82,7 @@ class State:
                                          for k in KPI_KEYS}}
         self.models = []            # llama-swap /v1/models summary
         self.running = []           # llama-swap /running entries
+        self._swap_models = []      # (engine key, model) pairs, for history spans
         self.engines = {}           # engine key -> engine state dict
         self.requests = collections.deque(maxlen=REqs_MAX)  # newest first
         self.events = collections.deque(maxlen=EVENTS_MAX)  # newest first
@@ -116,6 +119,9 @@ class State:
 
 
 S = State()
+# History defaults to a no-op so imports and tests never touch the disk;
+# main() swaps in a real History from cfg["history"]["retention_days"].
+HIST = history._Noop()
 
 
 # --------------------------------------------------------------------------
@@ -161,6 +167,7 @@ def push_event(level, msg, ts=None):
         S._pend_ev.insert(0, ev)
         if len(S._pend_ev) > 200:
             S._pend_ev.pop()
+    HIST.add_event(ev["t"], level, None, msg)   # cheap bounded append
     return ev
 
 
@@ -188,6 +195,10 @@ def add_request(rec):
         S._pend_req.insert(0, rec)
         if len(S._pend_req) > REqs_MAX:
             S._pend_req.pop()
+    # only reached for new records (merged duplicates return False above);
+    # History holds the dict reference and writes it after the 120 s merge
+    # window closes, so fields merged in later are captured
+    HIST.add_request(rec)
     return True
 
 
@@ -414,6 +425,25 @@ def llama_swap_poll():
             running = None
         with lock:
             S.running = running if running is not None else []
+        if running is not None:
+            # model spans for history: diff the running set (key, model)
+            models_now = []
+            for r in running:
+                model = r.get("model") or "model"
+                key = ("ninfer" if ("ninfer" in r.get("cmd", "")
+                                     or "NInfer" in model) else "llama")
+                if (key, model) not in models_now:
+                    models_now.append((key, model))
+            with lock:
+                prev = set(S._swap_models)
+                S._swap_models = models_now
+            cur = set(models_now)
+            if prev != cur:
+                t = now()
+                for key, model in cur - prev:
+                    HIST.model_loaded(key, model, t)
+                for key, model in prev - cur:
+                    HIST.model_unloaded(key, model, t)
         if running is not None:
             for r in running:
                 model = r.get("model") or "model"
@@ -823,72 +853,83 @@ def pct(vals, p):
 
 def kpi_thread():
     while True:
-        t = now()
-        t15 = t - 900
-        with lock:
-            reqs = [r for r in S.requests if (r.get("t") or 0) >= t15]
-            engines = {k: dict(v) for k, v in S.engines.items()}
-            gpu_last = S.gpu.get("last")
-            host_last = S.host.get("last")
-
-            # tps: prefer engine decode rates, fall back to window estimate
-            tps = 0.0
-            have_rate = False
-            for e in engines.values():
-                r = e.get("rates") or {}
-                if r.get("decode_tps") is not None:
-                    tps += r["decode_tps"]
-                    have_rate = True
-            if not have_rate and reqs:
-                span = sum(r.get("total_s") or 0 for r in reqs)
-                out = sum(r.get("output") or 0 for r in reqs)
-                if span > 0:
-                    tps = out / min(span * 2, 900.0)
-
-            rpm = sum(1 for r in S.requests if (r.get("t") or 0) >= t - 60)
-            recent = [r for r in S.requests if (r.get("t") or 0) >= t - 300]
-            totals = [r["total_s"] for r in recent if r.get("total_s")]
-            ttfts = [r["ttft_s"] for r in recent if r.get("ttft_s") is not None]
-            cache = fresh = out = 0
-            mtp_acc = mtp_tot = 0
-            for r in reqs:
-                cache += r.get("cache") or 0
-                fresh += r.get("fresh") or 0
-                out += r.get("output") or 0
-                mtp_acc += r.get("mtp_acc") or 0
-                mtp_tot += r.get("mtp_tot") or 0
-            cache_pct = round(100.0 * cache / (cache + fresh), 1) if (cache + fresh) else None
-            reingest = round(100.0 * fresh / (cache + fresh), 1) if (cache + fresh) else None
-            mtp = round(100.0 * mtp_acc / mtp_tot, 1) if mtp_tot else None
-            queue = sum((e.get("queue") or 0) for e in engines.values())
-            # TPOT: per-token generation time from recent requests
-            tpot = None
-            if reqs:
-                dt = sum((r.get("total_s") or 0) for r in reqs)
-                if out > 0:
-                    tpot = round((dt - sum(r.get("ttft_s") or 0 for r in reqs) if any(r.get("ttft_s") for r in reqs) else dt) / out * 1000.0, 1)
-
-            last = {
-                "t": t, "tps": round(tps, 1), "rpm": rpm,
-                "p95": round(pct(totals, 95) * 1000.0, 0) if totals else None,
-                "ttft": round(1000.0 * sum(ttfts) / len(ttfts), 0) if ttfts else None,
-                "tpot": tpot,
-                "vram": round(gpu_last["memory.used_gb"], 1) if gpu_last else None,
-                "vram_total": round(gpu_last["memory.total_gb"], 1) if gpu_last else None,
-                "cache": cache_pct, "reingest": reingest, "mtp": mtp,
-                "queue": queue,
-            }
-            S.kpi["last"] = last
-            for k in KPI_KEYS:
-                v = last.get(k)
-                S.kpi["hist"][k].append(v if v is not None else 0)
-            for key, e in S.engines.items():
-                r = e.get("rates") or {}
-                v = r.get("decode_tps")
-                if v is None:
-                    v = r.get("gen_tps_inst")
-                S.eng_series(key).append(v if v is not None else 0)
+        try:
+            kpi_pass()
+        except Exception as e:
+            # one bad pass must not kill the KPI feed: log and continue
+            push_event("err", "kpi: %s" % e)
         time.sleep(1.0)
+
+
+def kpi_pass():
+    t = now()
+    t15 = t - 900
+    with lock:
+        reqs = [r for r in S.requests if (r.get("t") or 0) >= t15]
+        engines = {k: dict(v) for k, v in S.engines.items()}
+        gpu_last = S.gpu.get("last")
+        host_last = S.host.get("last")
+
+        # tps: prefer engine decode rates, fall back to window estimate
+        tps = 0.0
+        have_rate = False
+        for e in engines.values():
+            r = e.get("rates") or {}
+            if r.get("decode_tps") is not None:
+                tps += r["decode_tps"]
+                have_rate = True
+        if not have_rate and reqs:
+            span = sum(r.get("total_s") or 0 for r in reqs)
+            out = sum(r.get("output") or 0 for r in reqs)
+            if span > 0:
+                tps = out / min(span * 2, 900.0)
+
+        rpm = sum(1 for r in S.requests if (r.get("t") or 0) >= t - 60)
+        recent = [r for r in S.requests if (r.get("t") or 0) >= t - 300]
+        totals = [r["total_s"] for r in recent if r.get("total_s")]
+        ttfts = [r["ttft_s"] for r in recent if r.get("ttft_s") is not None]
+        cache = fresh = out = 0
+        mtp_acc = mtp_tot = 0
+        for r in reqs:
+            cache += r.get("cache") or 0
+            fresh += r.get("fresh") or 0
+            out += r.get("output") or 0
+            mtp_acc += r.get("mtp_acc") or 0
+            mtp_tot += r.get("mtp_tot") or 0
+        cache_pct = round(100.0 * cache / (cache + fresh), 1) if (cache + fresh) else None
+        reingest = round(100.0 * fresh / (cache + fresh), 1) if (cache + fresh) else None
+        mtp = round(100.0 * mtp_acc / mtp_tot, 1) if mtp_tot else None
+        queue = sum((e.get("queue") or 0) for e in engines.values())
+        # TPOT: per-token generation time from recent requests
+        tpot = None
+        if reqs:
+            dt = sum((r.get("total_s") or 0) for r in reqs)
+            if out > 0:
+                tpot = round((dt - sum(r.get("ttft_s") or 0 for r in reqs) if any(r.get("ttft_s") for r in reqs) else dt) / out * 1000.0, 1)
+
+        last = {
+            "t": t, "tps": round(tps, 1), "rpm": rpm,
+            "p95": round(pct(totals, 95) * 1000.0, 0) if totals else None,
+            "ttft": round(1000.0 * sum(ttfts) / len(ttfts), 0) if ttfts else None,
+            "tpot": tpot,
+            "vram": round(gpu_last["memory.used_gb"], 1) if gpu_last else None,
+            "vram_total": round(gpu_last["memory.total_gb"], 1) if gpu_last else None,
+            "cache": cache_pct, "reingest": reingest, "mtp": mtp,
+            "queue": queue,
+        }
+        S.kpi["last"] = last
+        for k in KPI_KEYS:
+            v = last.get(k)
+            S.kpi["hist"][k].append(v if v is not None else 0)
+        for key, e in S.engines.items():
+            r = e.get("rates") or {}
+            v = r.get("decode_tps")
+            if v is None:
+                v = r.get("gen_tps_inst")
+            S.eng_series(key).append(v if v is not None else 0)
+    # history sample outside the State lock: `engines` and `gpu_last`
+    # were copied to plain values inside the lock above
+    HIST.sample(t, engines, dict(gpu_last) if gpu_last else None)
 
 
 # --------------------------------------------------------------------------
@@ -1023,12 +1064,20 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        path = self.path.split("?", 1)[0]
+        path, _, query = self.path.partition("?")
         if path == "/api/snapshot":
             try:
                 self._json(snapshot())
             except Exception as e:
                 self._json({"error": str(e)}, 500)
+        elif path == "/api/history":
+            self._history(query)
+        elif path == "/api/requests":
+            self._requests_api(query)
+        elif path == "/api/storage":
+            self._storage()
+        elif path == "/api/export":
+            self._export(query)
         elif path == "/api/stream":
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -1045,6 +1094,75 @@ class Handler(BaseHTTPRequestHandler):
                 pass
         else:
             self._static(path)
+
+    # -- history APIs (DESIGN.md §2) ------------------------------------------
+
+    def _history(self, query):
+        q = urllib.parse.parse_qs(query)
+        range_ = (q.get("range") or [""])[0]
+        engine = (q.get("engine") or [None])[0]
+        try:
+            rows = HIST.history(range_, engine)
+        except ValueError as e:          # unknown range -> 400
+            self._json({"error": str(e)}, 400)
+            return
+        except Exception as e:
+            self._json({"error": str(e)}, 500)
+            return
+        self._json({"range": range_, "engine": engine, "rows": rows})
+
+    def _requests_api(self, query):
+        q = urllib.parse.parse_qs(query)
+        since_raw = (q.get("since") or [None])[0]
+        limit_raw = (q.get("limit") or ["1000"])[0]
+        try:
+            since = int(float(since_raw)) if since_raw is not None else 0
+            limit = int(limit_raw)
+            if limit < 1:
+                raise ValueError
+        except (ValueError, TypeError):
+            self._json({"error": "since and limit must be integers"}, 400)
+            return
+        try:
+            rows = HIST.requests(since, limit)
+        except Exception as e:
+            self._json({"error": str(e)}, 500)
+            return
+        self._json({"rows": rows})
+
+    def _storage(self):
+        try:
+            self._json(HIST.storage())
+        except Exception as e:
+            self._json({"error": str(e)}, 500)
+
+    def _export(self, query):
+        q = urllib.parse.parse_qs(query)
+        fmt = (q.get("format") or ["csv"])[0]
+        range_ = (q.get("range") or ["24h"])[0]
+        if fmt not in ("csv", "json") or range_ not in history.RANGES:
+            self._json({"error": "format must be csv|json, "
+                                 "range one of %s" % sorted(history.RANGES)}, 400)
+            return
+        try:
+            data, truncated = HIST.export(fmt, range_)
+        except Exception as e:
+            self._json({"error": str(e)}, 500)
+            return
+        if fmt == "csv":
+            body = data.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/csv; charset=utf-8")
+            self.send_header("Content-Disposition",
+                             'attachment; filename="speculum-requests.csv"')
+            if truncated:
+                self.send_header("X-Speculum-Truncated", "1")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self._json({"rows": data, "truncated": truncated})
 
     def _static(self, path):
         if path == "/":
@@ -1160,7 +1278,7 @@ def start_scheduler(cfg):
 
 
 def main():
-    global PORT
+    global PORT, HIST
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=None)
     ap.add_argument("--config", default=None,
@@ -1178,6 +1296,17 @@ def main():
     elif cfg.get("server", {}).get("port"):
         PORT = int(cfg["server"]["port"])
     host = cfg.get("server", {}).get("host") or HOST
+
+    # Phase 2: history (DESIGN.md §2). retention_days 0 -> no-op object.
+    retention = int((cfg.get("history") or {}).get("retention_days", 30) or 0)
+    if retention > 0:
+        HIST = history.History(retention_days=retention,
+                               log=lambda m: push_event("warn", "history: %s" % m))
+        push_event("info", "history db · %s · keep %dd"
+                   % (HIST.path, retention))
+    else:
+        HIST = history._Noop()
+        push_event("info", "history off (retention_days = 0)")
 
     push_event("info", "collector up · port %d%s"
                % (PORT, " · config %s" % cfg_src if cfg_src else ""))
@@ -1197,6 +1326,8 @@ def main():
         srv.serve_forever()
     except KeyboardInterrupt:
         pass
+    finally:
+        HIST.close()                   # flush pending rows, close the db
 
 
 def ninfer_backend_poll():

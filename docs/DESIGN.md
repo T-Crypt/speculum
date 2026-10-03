@@ -191,10 +191,16 @@ anything that loads a model.
 
 ## Handoff (2026-10-03, for the next session)
 
-**Phase 1 state:** `collector/engines.py` exists (adapters, written by NInfer `coder`, compiles, NOT reviewed,
-NOT wired into `speculum.py`). Still to do for Phase 1: review engines.py against section 1, `collector/config.py`
-(speculum.toml loader), `speculum.example.toml`, discovery, the single scheduler thread, wiring in `main()`,
-`collector/test_engines.py`, then a live check (Ollama on 11434 must appear as an engine card; RSS < 55 MB).
+**State 2026-10-03 afternoon:** Phase 1 done (`09f26a4`; 1b, folding the old threads in, still open). Phase 2 done:
+`collector/history.py`, schema v3, 36 unit tests. Live-verified: rollup_1m token sums equal the request rows
+exactly; restarts add no duplicate rows (unique key + INSERT OR IGNORE, because llama-swap replays its activity
+feed on every start). Review fixes applied: rollups no longer read requests before the 130 s hold releases them;
+hours aggregate at H+1h+5min and self-heal after suspend; export caps at 50,000 rows with a truncation flag.
+Deferred: the dedupe key can merge two genuinely identical requests in the same second (adding the source `id`
+needs proof the id survives the replay). **Next: Phase 3** (UI: Basic/Advanced, engine cards, storage panel,
+range selector reading `/api/history`).
+
+**Phase 1 state (historical):** `collector/engines.py` was first written unwired; the rest of Phase 1 followed.
 
 **Operator asks, verbatim intent - all must land somewhere in Phases 1-5:**
 - Users add their own engines easily (config, no code). Engines list reads like: llama-swap, NInfer, Strata,

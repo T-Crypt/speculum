@@ -34,6 +34,8 @@ app.js  — EventSource with snapshot-poll fallback; owns paint loop, all panels
 |File|Owns|
 |---|---|
 |`collector/speculum.py`|All live data: GPU/host/llama-swap/NInfer/Strata poll threads, `State`, KPI assembly @ 1 Hz, snapshot/tick, HTTP server. Stdlib only.|
+|`collector/history.py`|SQLite history (DESIGN.md §2): one writer thread, 10 s commits, requests held 130 s for the merge window, minute/hour rollups, daily prune, `/api/history`, `/api/requests`, `/api/storage`, `/api/export`. `retention_days = 0` is a no-op. Stdlib `sqlite3` only.|
+|`collector/engines.py`, `collector/config.py`|Engine adapters + the single backoff scheduler; `speculum.toml` loader (DESIGN.md §1).|
 |`collector/speculum.service`|systemd `--user` unit. `CUDA_VISIBLE_DEVICES=` (GPU stays the llama-swap's), 64 M ceiling, nice 10.|
 |`index.html`|Page shell: 48 px top bar header, `#deck` with nine named section shells (`p-kpi` … `p-pool`), foot, one module script. Panels are built into the shells by `app.js`.|
 |`tokens.css`|Design tokens: dark theme (AETHER // NODE: `#05070a` base + faint radial wash, hairline borders, cyan/purple/green/yellow/orange/red series) on `:root`, light theme (darkened house hues, AA on white) on `[data-theme="light"]`; typography scale (11/12/13/14/30, Chakra Petch→system-ui display, Inter→system-ui body, mono numbers, tabular nums); spacing 4–32; radius 6/4; status + 6-series palettes; fixed semantic token colors (cached/fresh/generated); 2 px accent focus ring; reduced-motion kill switch (OS media query + `data-motion="reduced"`). Every text token is WCAG AA (4.5:1) on every surface it can sit on — documented in the file header.|
@@ -105,7 +107,8 @@ python3 -m http.server 8792  →  http://localhost:8792/?demo               # si
 
 ## Don't
 
-- Add dependencies, a build step, a framework, or a DB.
+- Add dependencies, a build step, a framework, or a database server. (The one sanctioned store is the stdlib
+  SQLite file in `collector/history.py`, DESIGN.md §2.)
 - Expose anything past 127.0.0.1 (or tailnet).
 - Cache, buffer, or retain data without a cap.
 - Put layout in `tokens.css`/`components.css`, or material in `layout.css`.
