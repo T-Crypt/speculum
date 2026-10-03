@@ -633,6 +633,7 @@ html[data-ripple="on"] .panel.is-rippling::after {
   background: var(--surface-2); border: 1px solid var(--border);
   border-radius: var(--r-ctl); padding: var(--sp-3);
 }
+.engine-card .engine-spark { height: 48px !important; max-height: 48px; width: 100%; }
 .engine-card .ec-head { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; }
 .engine-card .ec-head > .spacer { flex: 1; }
 .engine-card .ec-name { font-size: var(--fs-label); font-weight: 600; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -710,3 +711,6 @@ html[data-ripple="on"] .panel.is-rippling::after {
   .ctx-row { grid-template-columns: minmax(64px, 90px) minmax(0, 1fr) auto; }
   .ctx-row .ctx-engine { display: none; }
 }
+
+/* slot id sits on the series-coloured fill: dark text keeps it legible */
+.pool-cell .sid { color: #05070a; font-weight: 600; mix-blend-mode: normal; }

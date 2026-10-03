@@ -1245,7 +1245,7 @@ function buildEngines() {
     const reg = buildEngineRegistry(st.engines);
     for (const [key, c] of cards) {
       if (!reg.byKey.has(key)) continue;
-      paintSpark(c.spark, st.engHist[key] || [], seriesColor(reg.byKey.get(key).colorIndex));
+      paintSpark(c.spark, emaSmooth(st.engHist[key] || []).slice(-600), seriesColor(reg.byKey.get(key).colorIndex));
     }
     return null;
   };
