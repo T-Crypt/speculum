@@ -40,6 +40,9 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import config as spec_config
+import engines
+
 ROOT = Path(__file__).resolve().parent.parent
 HOST = "127.0.0.1"
 PORT = 8792
@@ -1072,24 +1075,124 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 
+def _port_of(u):
+    """Best-effort port from a proxy string ("http://h:p" or "h:p")."""
+    if not u:
+        return None
+    try:
+        p = urllib.request.urlparse(u if "//" in u else "http://" + u).port
+        if p:
+            return p
+    except Exception:
+        pass
+    if ":" in u:
+        tail = u.rsplit(":", 1)[-1]
+        if tail.isdigit():
+            return int(tail)
+    return None
+
+
+def claimed_ports():
+    """Ports the discovery probes must skip: llama-swap, Strata when up,
+    and the backend of any running entry (e.g. the NInfer proxy port)."""
+    ports = {9090}
+    with lock:
+        if S.strata.get("up"):
+            ports.add(8080)
+        for r in S.running or []:
+            p = _port_of(r.get("proxy") or "")
+            if p:
+                ports.add(p)
+    return ports
+
+
+def on_engine_result(a, rec):
+    """Write one scheduler poll into the shared engine state so the
+    existing UI renders it as an engine card (and the KPI pass appends
+    its decode_tps to the 1 Hz series like every other engine)."""
+    e = S.engine(a.key, a.label, a.type)
+    with lock:
+        if rec.get("up"):
+            e["up"] = True
+            e["state"] = rec.get("state")
+            if rec.get("parent"):
+                e["parent"] = rec["parent"]
+            ctxs = [m.get("ctx") for m in rec.get("models") or [] if m.get("ctx")]
+            if ctxs:
+                e["window"] = max(ctxs)
+            if "queue" in rec:
+                e["queue"] = rec["queue"]
+            if rec.get("sessions"):
+                e["sessions"] = rec["sessions"]
+                e["slots"] = rec["sessions"]
+            e["mtp"] = None
+            if rec.get("rates"):
+                e["rates"] = rec["rates"]
+            if rec.get("counters"):
+                e["counters"] = rec["counters"]
+            if rec.get("models"):
+                e["models"] = rec["models"]
+            clear_alert("engine %s down" % a.label)
+        else:
+            e["up"] = False
+            e["state"] = rec.get("state") or "error"
+            e["rates"] = None
+            e["counters"] = None
+            e["queue"] = None
+            e["sessions"] = []
+            e["mtp"] = None
+            add_alert("engine %s down" % a.label)
+
+
+def start_scheduler(cfg):
+    adapters = [engines.make_adapter(e) for e in cfg.get("engine") or []]
+    sched = engines.Scheduler(
+        adapters,
+        discovery_enabled=bool(cfg.get("discovery", {}).get("enabled", True)),
+        claimed_ports=claimed_ports,
+        on_result=on_engine_result,
+        on_event=lambda lv, m: push_event(lv, m),
+        on_discover=lambda a: push_event(
+            "info", "discovered %s · %s" % (a.label, a.url)),
+    )
+    threading.Thread(target=sched.run, daemon=True).start()
+    return sched
+
+
 def main():
     global PORT
     ap = argparse.ArgumentParser()
-    ap.add_argument("--port", type=int, default=PORT)
+    ap.add_argument("--port", type=int, default=None)
+    ap.add_argument("--config", default=None,
+                    help="speculum.toml path (default: repo root, then "
+                         "~/.config/speculum/speculum.toml)")
     args = ap.parse_args()
-    PORT = args.port
 
-    push_event("info", "collector up · port %d" % args.port)
+    try:
+        cfg, cfg_src = spec_config.load(args.config)
+    except FileNotFoundError as exc:
+        print("speculum: %s" % exc, file=sys.stderr)
+        sys.exit(2)
+    if args.port is not None:          # CLI wins over the config file
+        PORT = args.port
+    elif cfg.get("server", {}).get("port"):
+        PORT = int(cfg["server"]["port"])
+    host = cfg.get("server", {}).get("host") or HOST
+
+    push_event("info", "collector up · port %d%s"
+               % (PORT, " · config %s" % cfg_src if cfg_src else ""))
     for fn in (gpu_thread, host_thread, llama_swap_poll, sse_relay,
               logs_thread, strata_thread, kpi_thread):
         threading.Thread(target=fn, daemon=True).start()
     # NInfer backend poller starts once /running reports a proxy; run one
     # generic poller that follows the active NInfer entry.
     threading.Thread(target=ninfer_backend_poll, daemon=True).start()
+    # Phase 1: adapter scheduler beside the legacy threads (DESIGN.md §1).
+    start_scheduler(cfg)
 
-    srv = ThreadingHTTPServer((HOST, args.port), Handler)
+    srv = ThreadingHTTPServer((host, PORT), Handler)
     srv.daemon_threads = True
-    print("speculum collector on http://%s:%d" % (HOST, args.port), flush=True)
+    print("speculum collector on http://%s:%d" % (host, PORT), flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

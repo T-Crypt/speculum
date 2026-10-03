@@ -1,0 +1,46 @@
+# Speculum example config — copy to speculum.toml (repo root or
+# ~/.config/speculum/speculum.toml) and edit. The file is optional:
+# with none, Speculum probes localhost and shows what it finds.
+
+[server]
+host = "127.0.0.1"
+port = 8792
+
+[discovery]
+enabled = true              # probe the default ports on localhost
+
+[history]
+retention_days = 30         # 30, 60, 90 or 0 to turn history off
+
+# Any number of engines, on any host. Type names the adapter; the URL
+# may point anywhere (the collector is just an HTTP client).
+
+[[engine]]
+name = "ollama-desk"
+type = "ollama"
+url  = "http://10.0.0.41:11434"
+
+# llama-swap, NInfer and Strata are already watched by the built-in
+# threads; adding them here again is not needed (phase 1b folds those
+# threads into adapters).
+
+[[engine]]
+name = "my-engine"
+type = "custom"
+url  = "http://127.0.0.1:7000"
+health  = "/health"
+models  = "/v1/models"
+metrics = "/metrics"        # Prometheus text
+[engine.map]                # schema field = metric name in the engine's /metrics
+output_tokens = "myengine_generated_tokens_total"
+prompt_tokens = "myengine_prompt_tokens_total"
+queue         = "myengine_requests_waiting"
+
+# Secrets stay out of this file: name the environment variable that
+# holds the bearer token and Speculum sends it as Authorization.
+#
+# [[engine]]
+# name = "paywalled"
+# type = "openai"
+# url  = "https://api.example.com/v1"
+# api_key_env = "MY_ENGINE_KEY"

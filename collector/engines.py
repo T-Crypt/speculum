@@ -56,7 +56,8 @@ def parse_prom(text):
             continue
         if v != v or v in (float("inf"), float("-inf")):
             continue
-        out[parts[0]] = out.get(parts[0], 0.0) + v
+        name = parts[0].split("{", 1)[0]      # ignore labels
+        out[name] = out.get(name, 0.0) + v
     return out
 
 
@@ -144,8 +145,14 @@ class Adapter:
         return [k for k in OPTIONAL_BLOCKS if k in rec]
 
     def _finish(self, rec, counters=None):
-        """Fill caps, update the counter history used for rates, and
-        return (rec, up, busy) for the scheduler."""
+        """Fill the identity fields and caps, update the counter history
+        used for rates, set _busy, and return the rec (the full schema)."""
+        rec.setdefault("key", self.key)
+        rec.setdefault("label", self.label)
+        rec.setdefault("type", self.type)
+        rec.setdefault("url", self.url)
+        if self.parent:
+            rec.setdefault("parent", self.parent)
         rec["caps"] = self._caps(rec)
         up = bool(rec.get("up"))
         if up and counters:
@@ -161,7 +168,7 @@ class Adapter:
         if up:
             busy = busy or rec.get("state") == "running"
         self._busy = bool(busy)
-        return rec, up, busy
+        return rec
 
     def rates(self, counters, t, mapping):
         """Rates from counter deltas since the previous poll.
@@ -457,9 +464,12 @@ class CustomAdapter(Adapter):
                     rec[field] = int(m[name])
             if counters:
                 rec["counters"] = counters
-                r = self.rates(counters, t,
-                               {k: (k, None) for k in
-                                ("output_tokens",) if k in counters})
+                mapping = {}
+                if "output_tokens" in counters:
+                    mapping["decode_tps"] = ("output_tokens", None)
+                if "requests" in counters:
+                    mapping["req_rate"] = ("requests", None)
+                r = self.rates(counters, t, mapping)
                 if r:
                     rec["rates"] = r
         if self.models is not None:
@@ -505,21 +515,33 @@ ADAPTERS = {
     "custom": CustomAdapter,
 }
 
+# card labels for engines found by discovery (configured engines use
+# their [[engine]] name)
+TYPE_LABELS = {"ollama": "Ollama", "llamacpp": "llama.cpp", "vllm": "vLLM",
+               "lmstudio": "LM Studio", "openai": "OpenAI"}
+
 
 def make_adapter(eng, port=None):
     """Build an adapter from a config [[engine]] table (a plain dict of
     type/url/...); `port` overrides the table's url port (discovery)."""
-    cls = ADAPTERS.get(eng.get("type") or "custom", CustomAdapter)
+    etype = eng.get("type") or "custom"
+    cls = ADAPTERS.get(etype, CustomAdapter)
     url = eng.get("url") or ""
-    if port is not None:
+    if port is not None and url:
         p = urllib.request.urlparse(url)
         url = p._replace(netloc=(p.hostname or "127.0.0.1") + ":" + str(port)
                          ).geturl()
-    return cls(url=url or None, key=eng.get("name"), label=eng.get("name"),
-               parent=eng.get("parent"), api_key_env=eng.get("api_key_env"),
-               health=eng.get("health"), models=eng.get("models"),
-               metrics=eng.get("metrics"), slots=eng.get("slots"),
-               cmap=eng.get("map"))
+    a = cls(url=url or None, key=eng.get("name"), label=eng.get("name"),
+            parent=eng.get("parent"), api_key_env=eng.get("api_key_env"))
+    if isinstance(a, CustomAdapter):
+        a.health = eng.get("health")
+        a.models = eng.get("models")
+        a.metrics = eng.get("metrics")
+        a.slots = eng.get("slots")
+        a.map = eng.get("map") or {}
+    if not eng.get("name"):
+        a.label = TYPE_LABELS.get(etype, etype)
+    return a
 
 
 class Scheduler:
@@ -541,6 +563,8 @@ class Scheduler:
         self.on_result = on_result
         self.on_event = on_event
         self.on_discover = on_discover
+        self.clock = time.time      # injectable in tests
+        self._next_disc = None
         self.engines = {}
         for a in adapters:
             self.add(a)
@@ -608,7 +632,7 @@ class Scheduler:
                 self.on_event("err", "%s unreachable" % a.label)
         else:
             self._finish_rec(a, rec)
-            if self.on_result is not None and rec.get("up"):
+            if self.on_result is not None:
                 try:
                     self.on_result(a, rec)
                 except Exception:
@@ -633,37 +657,39 @@ class Scheduler:
 
     # -- the one loop ---------------------------------------------------------
 
+    def _step(self):
+        """Poll every engine whose next_due has come; set the next one."""
+        t = self.clock()
+        due = [e for e in self.engines.values() if e["next_due"] <= t]
+        due.sort(key=lambda e: e["next_due"])
+        for e in due:
+            a = e["adapter"]
+            self._poll(a)
+            if e["up"]:
+                e["backoff"] = 0
+                e["next_due"] = self.clock() + (1.0 if a._busy else 5.0)
+            else:
+                e["next_due"] = self.clock() + DOWN_BACKOFF[e["backoff"]]
+                e["backoff"] = min(e["backoff"] + 1, len(DOWN_BACKOFF) - 1)
+        if self._next_disc is not None and t >= self._next_disc:
+            self.discovery()
+            self._next_disc = t + DISCOVERY_EVERY
+
     def run(self):
         if self.discovery_enabled:
             self.discovery()
-            next_disc = time.time() + DISCOVERY_EVERY
+            self._next_disc = self.clock() + DISCOVERY_EVERY
         else:
-            next_disc = None
+            self._next_disc = None
         while not self._stop:
-            t = time.time()
-            due = [e for e in self.engines.values() if e["next_due"] <= t]
-            due.sort(key=lambda e: e["next_due"])
-            for e in due:
-                if self._stop:
-                    break
-                a = e["adapter"]
-                self._poll(a)
-                up = e["up"]
-                if up:
-                    e["backoff"] = 0
-                    e["next_due"] = time.time() + (1.0 if a._busy else 5.0)
-                else:
-                    e["backoff"] = min(e["backoff"] + 1, len(DOWN_BACKOFF) - 1)
-                    e["next_due"] = time.time() + DOWN_BACKOFF[e["backoff"]]
-            if next_disc is not None and t >= next_disc:
-                self.discovery()
-                next_disc = t + DISCOVERY_EVERY
+            self._step()
             time.sleep(self.TICK)
 
 
 if __name__ == "__main__":
     # quick manual probe: python3 engines.py [url ...]
-    urls = [u for u in ("http://127.0.0.1:11434", *(__import__("sys").argv[1:]))]
+    import sys
+    urls = ["http://127.0.0.1:11434"] + sys.argv[1:]
     for base in urls:
         for tname, cls in ADAPTERS.items():
             if tname == "custom":
