@@ -211,6 +211,9 @@ class _Noop:
     def requests(self, since, limit=1000):
         return []
 
+    def spans(self, range_):
+        return []
+
     def storage(self):
         return {"enabled": False, "path": None, "bytes": 0,
                 "retention_days": 0, "rows": {},
@@ -766,6 +769,25 @@ class History:
                     for r in conn.execute(q, args)]
         finally:
             conn.close()
+
+    def spans(self, range_):
+        """Model load spans that overlap the range (the load/unload timeline), oldest first. A span
+        still loaded has unloaded_at None."""
+        if not self._enabled:
+            return []
+        if range_ not in RANGES:
+            raise ValueError("range must be one of %s" % sorted(RANGES))
+        cutoff = int(self._clock() - RANGES[range_])
+        conn = self._reader()
+        try:
+            rows = conn.execute(
+                "SELECT engine, model, loaded_at, unloaded_at FROM model_spans "
+                "WHERE unloaded_at IS NULL OR unloaded_at >= ? ORDER BY loaded_at",
+                (cutoff,)).fetchall()
+        finally:
+            conn.close()
+        # explicit keys (not _row_to_dict, which drops None): an open span says unloaded_at: null
+        return [dict(zip(("engine", "model", "loaded_at", "unloaded_at"), r)) for r in rows]
 
     def _request_rows(self, since, limit):
         """Unclamped fetch (export uses it with EXPORT_CAP); requests()

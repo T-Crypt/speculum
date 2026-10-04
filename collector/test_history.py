@@ -609,6 +609,22 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(row, ("model-b", 300.0, 300.0))
         h.close()
 
+    def test_spans_query_overlaps_range(self):
+        h = self.mkhist()
+        t = self.clock.t
+        h.model_loaded("llama", "old", t - 30 * 3600)          # ended before the 24 h window
+        h.model_unloaded("llama", "old", t - 25 * 3600)
+        h.model_loaded("llama", "spans-in", t - 26 * 3600)     # started before, ended inside
+        h.model_unloaded("llama", "spans-in", t - 2 * 3600)
+        h.model_loaded("strata", "live", t - 3600)             # still loaded
+        h.flush()
+        rows = h.spans("24h")
+        self.assertEqual([r["model"] for r in rows], ["spans-in", "live"])
+        self.assertIsNone(rows[-1]["unloaded_at"])
+        with self.assertRaises(ValueError):
+            h.spans("2h")
+        h.close()
+
     # ------------------------------------------------------------ export
 
     def test_export_json_and_csv(self):

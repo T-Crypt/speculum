@@ -55,3 +55,17 @@ def test_ninfer_port_from_argv():
     assert speculum.ninfer_port_of(["ninfer-serve", "m.ninfer", "--port=18099"]) == 18099
     assert speculum.ninfer_port_of(["ninfer-serve", "m.ninfer"]) == 8080
     assert speculum.ninfer_port_of(["ninfer-serve", "--port", "--host"]) == 8080
+
+
+def test_threshold_alerts():
+    import config
+    cfg = dict(config.DEFAULTS["alerts"])
+    gpu = {"temperature.gpu": 27, "memory.used": 23950, "memory.total": 24564}     # Strata: 97.5%, normal
+    procs = [(20442, "strata", 23898), (1, "llama-server", 21000), (2, "ninfer-serve-46645ada", 23000),
+             (3, "ollama", 900), (4, "node", 300)]
+    assert speculum.threshold_alerts(cfg, gpu, [{"key": "strata", "queue": 0}], procs) == {}
+    hot = speculum.threshold_alerts(cfg, {"temperature.gpu": 85, "memory.used": 24400, "memory.total": 24564},
+                                    [{"key": "llama", "label": "llama.cpp", "queue": 9}],
+                                    procs + [(26460, "node", 2270)])     # the zvec-grep squatter, 2026-09-27
+    assert set(hot) == {"GPU temperature over 83 °C", "VRAM over 99%", "queue over 8 on llama.cpp",
+                        "foreign VRAM: node (pid 26460) holds 2270 MiB"}

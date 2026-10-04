@@ -846,6 +846,7 @@ def strata_requests(sj):
 
 
 def strata_thread():
+    span = None             # the model of Strata's open load span (the timeline), or None
     while True:
         up = True
         models, metrics, slots, sj = [], {}, [], None
@@ -906,6 +907,16 @@ def strata_thread():
                                % (fmtk(rec["prompt"]), fmtk(rec["output"]),
                                   rec["cache_pct"] if rec["cache_pct"] is not None else "—",
                                   rec["total_s"] or 0))
+        # load spans for the timeline: Strata is started by hand, so up/down is its load/unload
+        model = ((sj or {}).get("engine") or {}).get("model") or (models[0].get("id") if models else None)
+        if up and model and span != model:
+            if span:
+                HIST.model_unloaded("strata", span, now())
+            HIST.model_loaded("strata", model, now())
+            span = model
+        elif not up and span:
+            HIST.model_unloaded("strata", span, now())
+            span = None
         if not up:
             e.pop("counters", None)
             with lock:
@@ -925,6 +936,69 @@ def pct(vals, p):
     f = int(k)
     c = min(f + 1, len(vals) - 1)
     return vals[f] + (vals[c] - vals[f]) * (k - f)
+
+
+ALERTS = {}          # cfg["alerts"], set by main()
+
+
+def gpu_processes():
+    """[(pid, name, MiB)] of every compute process on the GPU (nvidia-smi; no CUDA context here)."""
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-compute-apps=pid,process_name,used_memory",
+                              "--format=csv,noheader,nounits"], capture_output=True, text=True,
+                             timeout=5).stdout
+    except Exception:
+        return []
+    procs = []
+    for line in out.splitlines():
+        parts = [x.strip() for x in line.split(",")]
+        if len(parts) == 3 and parts[0].isdigit():
+            procs.append((int(parts[0]), os.path.basename(parts[1]), parse_num(parts[2]) or 0))
+    return procs
+
+
+def threshold_alerts(cfg, gpu, engines_, procs):
+    """{message: True} for every threshold crossed right now (pure: the thread holds and fires them)."""
+    out = {}
+    if gpu:
+        if (gpu.get("temperature.gpu") or 0) > cfg["gpu_temp_c"]:
+            out["GPU temperature over %d °C" % cfg["gpu_temp_c"]] = True
+        tot = gpu.get("memory.total") or 0
+        if tot and 100.0 * (gpu.get("memory.used") or 0) / tot > cfg["vram_pct"]:
+            out["VRAM over %d%%" % cfg["vram_pct"]] = True
+    for e in engines_:
+        if (e.get("queue") or 0) > cfg["queue"]:
+            out["queue over %d on %s" % (cfg["queue"], e.get("label") or e.get("key"))] = True
+    known = [n.lower() for n in cfg["engine_processes"]]
+    for pid, name, mib in procs:
+        if mib >= cfg["foreign_vram_mib"] and not any(k in name.lower() for k in known):
+            out["foreign VRAM: %s (pid %d) holds %d MiB" % (name, pid, mib)] = True
+    return out
+
+
+def alerts_thread():
+    """Threshold alerts: a condition must hold for hold_s before it is raised, and clears when it ends."""
+    since, raised, procs, last_procs = {}, set(), [], 0.0
+    while True:
+        t = time.time()
+        if t - last_procs >= 15:
+            procs, last_procs = gpu_processes(), t
+        with lock:
+            gpu = dict(S.gpu.get("last") or {})
+            engs = [dict(e) for e in S.engines.values()]
+        now_on = threshold_alerts(ALERTS, gpu, engs, procs)
+        for msg in now_on:
+            since.setdefault(msg, t)
+            if msg not in raised and t - since[msg] >= ALERTS["hold_s"]:
+                add_alert(msg)
+                raised.add(msg)
+        for msg in list(since):
+            if msg not in now_on:
+                since.pop(msg)
+                if msg in raised:
+                    clear_alert(msg)
+                    raised.discard(msg)
+        time.sleep(5.0)
 
 
 def kpi_thread():
@@ -1150,6 +1224,8 @@ class Handler(BaseHTTPRequestHandler):
             self._history(query)
         elif path == "/api/requests":
             self._requests_api(query)
+        elif path == "/api/spans":
+            self._spans(query)
         elif path == "/api/storage":
             self._storage()
         elif path == "/api/export":
@@ -1186,6 +1262,18 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": str(e)}, 500)
             return
         self._json({"range": range_, "engine": engine, "rows": rows})
+
+    def _spans(self, query):
+        range_ = (urllib.parse.parse_qs(query).get("range") or ["24h"])[0]
+        try:
+            rows = HIST.spans(range_)
+        except ValueError as e:          # unknown range -> 400
+            self._json({"error": str(e)}, 400)
+            return
+        except Exception as e:
+            self._json({"error": str(e)}, 500)
+            return
+        self._json({"range": range_, "spans": rows})
 
     def _requests_api(self, query):
         q = urllib.parse.parse_qs(query)
@@ -1396,6 +1484,8 @@ def main():
     # NInfer backend poller starts once /running reports a proxy; run one
     # generic poller that follows the active NInfer entry.
     threading.Thread(target=ninfer_backend_poll, daemon=True).start()
+    ALERTS.update(cfg.get("alerts") or spec_config.DEFAULTS["alerts"])
+    threading.Thread(target=alerts_thread, daemon=True).start()
     # Phase 1: adapter scheduler beside the legacy threads (DESIGN.md §1).
     start_scheduler(cfg)
 

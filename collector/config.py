@@ -20,6 +20,10 @@ DEFAULTS = {
     "server": {"host": "127.0.0.1", "port": 8792},
     "discovery": {"enabled": True},
     "history": {"retention_days": 30},   # 30, 60, 90 or 0 to turn off
+    # Threshold alerts (DESIGN.md section 3), each held for hold_s before it fires. vram_pct is high on
+    # purpose: engines fill the card by design; the useful VRAM alert is a foreign process holding it.
+    "alerts": {"vram_pct": 99, "gpu_temp_c": 83, "queue": 8, "hold_s": 30, "foreign_vram_mib": 512,
+               "engine_processes": ["llama-server", "ninfer-serve", "strata", "ollama"]},
     "engine": [],
 }
 
@@ -72,6 +76,7 @@ def load(path=None):
         "server": dict(DEFAULTS["server"]),
         "discovery": dict(DEFAULTS["discovery"]),
         "history": dict(DEFAULTS["history"]),
+        "alerts": dict(DEFAULTS["alerts"]),
         "engine": [],
     }
     if used is None:
@@ -80,6 +85,7 @@ def load(path=None):
     _merge(cfg["server"], raw.get("server"))
     _merge(cfg["discovery"], raw.get("discovery"))
     _merge(cfg["history"], raw.get("history"))
+    _merge(cfg["alerts"], raw.get("alerts"))
     for e in raw.get("engine") or []:
         if isinstance(e, dict) and e.get("type"):
             cfg["engine"].append(_clean_engine(e))
