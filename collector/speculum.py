@@ -425,6 +425,16 @@ def llama_swap_poll():
             running = None
         with lock:
             S.running = running if running is not None else []
+        # llama-swap's engine is llama.cpp (llama-server): one llama.cpp card follows llama-swap. It names
+        # the running model when there is one (the loop below), reads "llama.cpp" when idle, and says why
+        # when llama-swap does not answer. NInfer, also started by llama-swap, keeps its own card.
+        sw = S.engine("llama", "llama.cpp", "llama-swap")
+        with lock:
+            sw["up"] = running is not None
+            sw["label"], sw["origin"] = "llama.cpp", "llama-swap"
+            sw["backend"] = None      # the running model's proxy, set below
+            sw["reason"] = None if running is not None else (
+                "llama-swap not answering on %s" % LLAMA_SWAP.split("//", 1)[-1])
         if running is not None:
             # model spans for history: diff the running set (key, model)
             models_now = []
@@ -452,7 +462,7 @@ def llama_swap_poll():
                 if "ninfer" in r.get("cmd", "") or "NInfer" in model:
                     key, label, origin, window = "ninfer", model, "ninfer", None
                 else:
-                    key, label, origin, window = "llama", model, "llama", None
+                    key, label, origin, window = "llama", model, "llama-swap", None
                 e = S.engine(key, label, origin, window)
                 e["up"] = True
                 e["latched"] = False
@@ -804,6 +814,36 @@ def strata_json_into(e, sj):
                          engine_version=eng.get("version"))
 
 
+def strata_requests(sj):
+    """Strata's finished requests (JSON /metrics) as Speculum request records; add_request dedupes by id."""
+    eng = sj.get("engine") or {}
+    out = []
+    for r in sj.get("requests") or []:
+        t = r.get("time")
+        if not t:
+            continue
+        # cached = prompt - read: Strata's `reused` can exceed prompt_tokens (a reply that is reused as
+        # well), which made cache hit read 106%; prompt_read is the tokens actually read.
+        prompt, prompt_ms = r.get("prompt_tokens") or 0, r.get("prompt_ms")
+        read = r.get("prompt_read")
+        fresh = min(prompt, read) if read is not None else max(0, prompt - (r.get("reused") or 0))
+        cache = prompt - fresh
+        out.append({
+            "id": "strata-%.3f" % t, "ts": None, "t": t, "model": eng.get("model") or "strata",
+            "origin": "strata", "prompt": prompt, "cache": cache, "fresh": fresh,
+            "output": r.get("output_tokens") or 0,
+            "cache_pct": round(100.0 * cache / prompt, 1) if prompt else None,
+            "total_s": r.get("duration_s"),
+            "ttft_s": prompt_ms / 1000.0 if prompt_ms is not None else None,   # prompt read time
+            "queue_s": None,
+            "prefill_tps": round(fresh / (prompt_ms / 1000.0), 1) if prompt_ms and fresh else None,
+            "decode_tps": r.get("decode_tok_s"),
+            "mtp_acc": r.get("drafts_accepted"), "mtp_tot": r.get("drafts_offered"),
+            "window": eng.get("max_context"),
+        })
+    return out
+
+
 def strata_thread():
     while True:
         up = True
@@ -856,6 +896,13 @@ def strata_thread():
                         e["window"] = m.get("context_window")
             if sj:
                 strata_json_into(e, sj)
+        if sj:
+            for rec in reversed(strata_requests(sj)):     # oldest first, so the feed stays newest-first
+                if add_request(rec):
+                    push_event("req", "req done · strata · ↑%s ↓%s · cache %s%% · %.1fs"
+                               % (fmtk(rec["prompt"]), fmtk(rec["output"]),
+                                  rec["cache_pct"] if rec["cache_pct"] is not None else "—",
+                                  rec["total_s"] or 0))
         if not up:
             e.pop("counters", None)
             with lock:
@@ -1018,7 +1065,7 @@ def snapshot():
                 "rates": e.get("rates"), "mtp": e.get("mtp"),
                 "window": e.get("window"), "sessions": e.get("sessions", []),
                 "service_unavailable": e.get("service_unavailable", 0),
-                "counters": e.get("counters"),
+                "counters": e.get("counters"), "reason": e.get("reason"),
                 "hist": list(S.eng_hist.get(k, ()))[-HIST_SECONDS:],
             } for k, e in S.engines.items()},
             "strata": {
@@ -1060,7 +1107,7 @@ def tick():
                 "up": e.get("up"), "latched": bool(e.get("latched")),
                 "queue": e.get("queue"), "rates": e.get("rates"),
                 "mtp": e.get("mtp"), "sessions": e.get("sessions", []),
-                "counters": e.get("counters"),
+                "counters": e.get("counters"), "reason": e.get("reason"),
                 "rate": ((S.eng_hist.get(k) or [None])[-1]
                          if S.eng_hist.get(k) else None),
             } for k, e in S.engines.items()},

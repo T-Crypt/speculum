@@ -239,6 +239,16 @@ class OllamaAdapter(Adapter):
         return self._finish(rec, counters=rec["counters"])
 
 
+def _is_strata(url):
+    """True when the server at `url` says it is Strata (/health {"service": "strata"})."""
+    try:
+        r = urllib.request.urlopen(urllib.request.Request(url + "/health"), timeout=TIMEOUT_LOCAL)
+        body = json.loads(r.read().decode("utf-8", "replace"))
+    except Exception:
+        return False
+    return isinstance(body, dict) and body.get("service") == "strata"
+
+
 class LlamaCppAdapter(Adapter):
     type = "llamacpp"
     default_port = 8080
@@ -256,6 +266,10 @@ class LlamaCppAdapter(Adapter):
                 timeout=TIMEOUT_LOCAL if _is_local(url) else TIMEOUT_REMOTE)
             body = json.loads(p.read().decode("utf-8", "replace"))
         except Exception:
+            return False
+        # Strata serves a llama.cpp-shaped /props too (build_info "Strata 0.1.38"); it has its own
+        # poller, and as llama.cpp it reads as down (no llamacpp: counters) and raises a false alert.
+        if isinstance(body, dict) and str(body.get("build_info", "")).startswith("Strata"):
             return False
         return isinstance(body, dict) and "default_generation_settings" in body
 
@@ -604,6 +618,10 @@ class Scheduler:
             if port in claimed:
                 continue
             base = "http://127.0.0.1:%d" % port
+            # Strata has its own poller and passes the llama.cpp and OpenAI fingerprints; at startup it
+            # may not be claimed yet (its poller has not answered), so ask the server who it is.
+            if _is_strata(base):
+                continue
             for tname in types:
                 try:
                     ok = ADAPTERS[tname].fingerprint(base)

@@ -45,10 +45,14 @@ class StubHandler(BaseHTTPRequestHandler):
             self._send(200,
                        json.dumps({"models": st.get("ps_models", [])}).encode(),
                        "application/json")
+        elif p == "/health" and st.get("health_service"):
+            self._send(200, json.dumps({"status": "ok", "service": st["health_service"]}).encode(),
+                       "application/json")
         elif p == "/props":
-            self._send(200, json.dumps(
-                {"default_generation_settings": {"n_ctx": 4096}}).encode(),
-                "application/json")
+            props = {"default_generation_settings": {"n_ctx": 4096}}
+            if st.get("props_build_info"):
+                props["build_info"] = st["props_build_info"]
+            self._send(200, json.dumps(props).encode(), "application/json")
         elif p == "/metrics":
             st["metrics_calls"] += 1
             n = st["metrics_calls"]
@@ -319,6 +323,28 @@ class TestSchedulerBackoff(unittest.TestCase):
         sched._step()
         self.assertEqual(len(self.results), 1)
         self.assertFalse(self.results[0][1]["up"])
+
+
+
+class StrataIsNotLlamaCpp(StubServer):
+    """Strata serves a llama.cpp-shaped /props (build_info "Strata 0.1.38"); discovery must not take it
+    for llama.cpp, or a false "llama.cpp down" card and alert appear beside Strata's own."""
+
+    def test_fingerprint(self):
+        self.reset_stub()
+        self.assertTrue(engines.ADAPTERS["llamacpp"].fingerprint(self.url))
+        self.server.state["props_build_info"] = "b11115-abc"
+        self.assertTrue(engines.ADAPTERS["llamacpp"].fingerprint(self.url))
+        self.server.state["props_build_info"] = "Strata 0.1.38"
+        self.assertFalse(engines.ADAPTERS["llamacpp"].fingerprint(self.url))
+        self.server.state.pop("props_build_info")
+
+    def test_discovery_identity(self):
+        self.reset_stub()
+        self.assertFalse(engines._is_strata(self.url))
+        self.server.state["health_service"] = "strata"
+        self.assertTrue(engines._is_strata(self.url))
+        self.server.state.pop("health_service")
 
 
 if __name__ == "__main__":
