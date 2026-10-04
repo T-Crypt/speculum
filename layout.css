@@ -39,11 +39,19 @@
   align-content: start;
 }
 
+/* --- row stretching (DESIGN.md §3: no panel leaves dead space beside a taller
+   neighbour at 1440 / 1024 / 768 px) ------------------------------------------ */
+/* A shell stretches to its grid row by default; make it pass that height down
+   to its panel, and the panel body takes whatever the header does not use, so
+   charts and tile areas fill the row instead of leaving a gap under a shorter
+   neighbour (throughput/context, GPU/ledger, events/pool). The engines shell is
+   itself a card grid, so it is not flexed here. Applies to both views. */
+.deck > section:not(.g-engines) { display: flex; }
+.deck > section > .panel { flex: 1 1 auto; }
+
 /* --- Basic view (the class is set on #deck by app.js) ------------------------ */
 /* Basic shows KPI, throughput, GPU & host and engines; the five Advanced-only
-   shells are display:none, so the areas below hold no empty cell. Paired
-   panels share a row and stretch to the same height: the shell passes the row
-   height down to its panel. Advanced keeps the grid above unchanged. */
+   shells are display:none, so the areas below hold no empty cell. */
 .deck.view-basic {
   grid-template-areas:
     "kpi kpi kpi kpi kpi kpi kpi kpi kpi kpi kpi kpi"
@@ -59,8 +67,6 @@
 .deck.view-basic .g-requests,
 .deck.view-basic .g-events,
 .deck.view-basic .g-pool { display: none; }
-.deck.view-basic > section { display: flex; }
-.deck.view-basic > section > .panel { flex: 1; }
 
 /* --- top bar (48px, full-bleed hairline over the centred deck) -------------- */
 .topbar {
@@ -156,15 +162,28 @@
   }
 }
 
+/* Below 1024 px the one-row bar no longer fits the status cluster: it wraps to rows instead of the
+   cluster scrolling sideways, which had pushed the Basic/Advanced toggle off-screen (769-1023 px
+   as well as phone width). */
+@media (max-width: 1023px) {
+  .topbar { flex-wrap: wrap; height: auto; min-height: 48px; row-gap: var(--sp-2); }
+  .topbar .brand { flex: 1 1 100%; }
+  .topbar .spacer { display: none; }
+  .topbar .cluster { flex: 1 1 100%; flex-wrap: wrap; }
+  .topbar .cluster > .segmented { margin-left: auto; }
+}
+
 @media (max-width: 768px) {
   /* minmax(0, 1fr), not 1fr: a bare 1fr track never shrinks below its widest
      table, which pushed the whole deck to ~535 px on a 390 px phone */
   .deck { grid-template-columns: minmax(0, 1fr); padding: var(--sp-2) var(--sp-3) var(--sp-4); }
   /* wide tables scroll inside their panel instead of the page scrolling */
   .table-wrap { overflow-x: auto; overscroll-behavior-x: contain; }
-  /* the status cluster swipes sideways rather than running off the bar */
-  .topbar .cluster { overflow-x: auto; scrollbar-width: none; }
-  .topbar .cluster::-webkit-scrollbar { display: none; }
+  /* the bar wraps to rows instead of the cluster scrolling sideways: a scrolling
+     cluster pushed the Basic/Advanced toggle off-screen at phone width. Brand on
+     its own row, the cluster below it, and the toggle is the item that wraps onto
+     a row of its own — nothing is clipped, so the page never scrolls sideways.
+     Above 768 px the bar stays a single 48 px row. */
   .g-kpi, .g-throughput, .g-gpu, .g-context, .g-ledger,
   .g-requests, .g-engines, .g-events, .g-pool { grid-column: 1 / -1; }
   .g-engines { grid-template-columns: 1fr; }

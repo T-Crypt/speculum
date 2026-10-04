@@ -29,6 +29,13 @@
 .panel--flush { padding: 0; }
 .panel--flush > .panel-head { padding: var(--sp-3) var(--sp-4); }
 .panel--flush > .panel-body { padding: 0 var(--sp-4) var(--sp-4); }
+/* the body takes the height the header does not: a panel stretched to its row
+   fills with content instead of leaving a gap under the chart or table.
+   flex-basis is `auto`, not 0: in an auto-height panel a 0 basis makes a canvas
+   size itself from its own width/height attributes, so the chart grew every
+   paint. `auto` keeps each child's specified size as its base and only takes
+   the space the row actually has left over. */
+.panel-body { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
 .panel--body { flex: 1; min-height: 0; }
 
 /* --- PanelHeader ----------------------------------------------------------- */
@@ -291,6 +298,9 @@
 .status-pill[data-state="paused"] > .pdot { background: var(--idle); }
 
 /* --- DataTable ---------------------------------------------------------------------- */
+/* the wrapper takes whatever height the stretched panel has left; the table
+   itself keeps its natural height (rows are never stretched to fill) */
+.table-wrap { flex: 1 1 auto; min-height: 0; }
 .data-table {
   width: 100%;
   border-collapse: collapse;
@@ -559,9 +569,10 @@ html[data-ripple="on"] .panel.is-rippling::after {
 .kpi-group .stat-value[data-status="idle"] { color: var(--text-3); }
 .kpi-group .stat-spark { height: 28px; }
 
-/* Throughput */
-.tp-wrap { position: relative; }
-.tp-canvas { width: 100%; height: 232px; display: block; }
+/* Throughput — the chart area takes the row height (fit() reads clientHeight, so
+   a taller box draws a taller chart); 232 px is the floor, not the fixed size */
+.tp-wrap { position: relative; flex: 1 1 auto; min-height: 232px; display: flex; flex-direction: column; }
+.tp-canvas { width: 100%; height: 232px; flex: 1 1 auto; display: block; }
 .tp-tip {
   position: absolute; top: 8px; z-index: 5; pointer-events: none;
   background: var(--surface-2); border: 1px solid var(--border-strong);
@@ -600,8 +611,8 @@ html[data-ripple="on"] .panel.is-rippling::after {
 /* Context residency */
 /* stacked request columns: cached (green) + fresh prefill (orange) +
    generated (cyan), scaled to the max model window of the set */
-.ctx-wrap { position: relative; }
-.ctx-canvas { width: 100%; height: 300px; display: block; }
+.ctx-wrap { position: relative; flex: 1 1 auto; min-height: 300px; display: flex; flex-direction: column; }
+.ctx-canvas { width: 100%; height: 300px; flex: 1 1 auto; display: block; }
 .ctx-legend {
   display: flex; align-items: center; gap: 4px 10px; flex-wrap: wrap;
   font-size: var(--fs-meta); color: var(--text-3);
@@ -629,9 +640,11 @@ html[data-ripple="on"] .panel.is-rippling::after {
 .mix i { display: block; height: 100%; }
 .ledger-note { font-size: var(--fs-meta); color: var(--text-3); margin: 0; }
 
-/* Engine cards (inset boxes inside the Engines panel). Cards keep a bounded
-   width: with 1-2 live engines the panel must not stretch a card to 1700 px. */
-.engine-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 380px)); gap: var(--sp-3); }
+/* Engine cards (inset boxes inside the Engines panel). auto-fit collapses the
+   empty tracks, so the cards fill the row instead of leaving a dead column when
+   the engine count is one short of the track count (3 cards in a 4-track row at
+   1440 px). A single engine now spans the row — that is the trade for the gap. */
+.engine-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: var(--sp-3); flex: 1 1 auto; }
 .engine-card {
   display: flex; flex-direction: column; gap: var(--sp-2);
   background: var(--surface-2); border: 1px solid var(--border);
@@ -664,7 +677,9 @@ html[data-ripple="on"] .panel.is-rippling::after {
 .pool-grid::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 4px; }
 .ev-wrap::-webkit-scrollbar-track, .ctx-list::-webkit-scrollbar-track,
 .pool-grid::-webkit-scrollbar-track { background: transparent; }
-.ev-wrap { max-height: 420px; overflow-y: auto; }
+/* the event list fills the row it shares with the KV pool: it takes the height
+   the panel has left, capped so a long buffer still scrolls inside the panel */
+.ev-wrap { flex: 1 1 auto; min-height: 120px; max-height: 420px; overflow-y: auto; }
 .ev-filter {
   font-family: inherit;
   font-size: var(--fs-meta);
@@ -688,10 +703,14 @@ html[data-ripple="on"] .panel.is-rippling::after {
 .lv-pill[data-sev="req"]   { color: var(--accent); background: var(--accent-soft); }
 .lv-pill[data-sev="info"]  { color: var(--text-2); background: var(--surface-2); }
 
-/* KV slot pool */
+/* KV slot pool — the tile area takes the height of the row it shares with
+   Events (tiles keep their 58 px height and pack from the top; any leftover is
+   inside the tile area, not beside the panel). The 420 px ceiling matches the
+   Events list, so a long slot list still scrolls inside its own panel. */
 .pool-grid {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(64px, 1fr));
-  gap: var(--sp-2); max-height: 340px; overflow-y: auto; padding-right: 2px;
+  gap: var(--sp-2); flex: 1 1 auto; min-height: 120px; max-height: 420px;
+  align-content: start; overflow-y: auto; padding-right: 2px;
 }
 .pool-cell {
   position: relative; height: 58px; overflow: hidden;
