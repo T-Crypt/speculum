@@ -349,3 +349,60 @@ class StrataIsNotLlamaCpp(StubServer):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class _UnslothStub(BaseHTTPRequestHandler):
+    """What a real `unsloth studio` answered (probed 2026-10-03): /api/health needs no key,
+    /v1/models is 401 without one."""
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        key = self.headers.get("Authorization") == "Bearer sk-unsloth-test"
+        if self.path == "/api/health":
+            body, code = {"status": "healthy", "service": "Unsloth UI Backend", "chat_only": True}, 200
+        elif self.path == "/v1/models" and key:
+            body, code = {"object": "list", "data": [{"id": "unsloth/Qwen3-8B-GGUF"}]}, 200
+        elif self.path == "/v1/models":
+            body, code = {"error": {"message": "Not authenticated", "type": "authentication_error"}}, 401
+        else:
+            body, code = {"detail": "API endpoint not found"}, 404
+        raw = json.dumps(body).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+
+class UnslothStudio(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), _UnslothStub)
+        cls.server.daemon_threads = True
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+        cls.url = "http://127.0.0.1:%d" % cls.server.server_address[1]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+
+    def test_fingerprint_and_poll(self):
+        A = engines.ADAPTERS["unsloth"]
+        self.assertTrue(A.fingerprint(self.url))
+        os.environ.pop("UNSLOTH_STUDIO_AUTH_TOKEN", None)
+        rec = A(url=self.url).poll()
+        self.assertTrue(rec["up"])
+        self.assertIn("API key needed", rec.get("reason") or "")
+        os.environ["UNSLOTH_STUDIO_AUTH_TOKEN"] = "sk-unsloth-test"
+        try:
+            rec = A(url=self.url).poll()
+        finally:
+            os.environ.pop("UNSLOTH_STUDIO_AUTH_TOKEN", None)
+        self.assertEqual(rec["state"], "running")
+        self.assertEqual([m["id"] for m in rec["models"]], ["unsloth/Qwen3-8B-GGUF"])
+
+    def test_closed_port_is_not_unsloth(self):
+        self.assertFalse(engines.ADAPTERS["unsloth"].fingerprint("http://127.0.0.1:1"))

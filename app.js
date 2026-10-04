@@ -200,6 +200,12 @@ function applyTick(d) {
 }
 
 function syncEnginesFromTick(d) {
+  if (d.engines) {
+    /* the collector removes an engine that is gone (NInfer without a live ninfer-serve); so does the
+       card list. Strata is kept: its card follows the tick's strata_up below. */
+    const live = new Set(Object.keys(d.engines));
+    state.engines = state.engines.filter(e => live.has(e.key) || e.key === 'strata');
+  }
   for (const key of Object.keys(d.engines || {})) {
     const t = d.engines[key];
     let e = state.engines.find(x => x.key === key);
@@ -221,6 +227,7 @@ function syncEnginesFromTick(d) {
     if (t.origin) e.origin = t.origin;
     if (t.window) e.window = t.window;
     if (t.backend) e.backend = t.backend;
+    e.reason = t.reason || null;
     if (t.hist) state.engHist[e.key] = [...t.hist];
     if (t.rate != null) pushHist(state.engHist[e.key], t.rate);
     else if (t.rates) {
@@ -1249,7 +1256,7 @@ function buildEngines() {
       c.sub.textContent = [
         e.origin || '—',
         e.window ? `${fmtTok(e.window)} ctx` : null,
-        e.backend || (e.up === true ? 'local' : 'no backend'),
+        e.reason || e.backend || (e.up === true ? 'local' : 'no backend'),
       ].filter(Boolean).join(' · ');
       c.card.classList.toggle('is-muted', info.muted);
       const rate = e.rates ? (e.rates.decode_tps != null ? e.rates.decode_tps : e.rates.gen_tps_inst) : null;

@@ -36,6 +36,7 @@ DISCOVERY = [
     (8080, ("llamacpp", "openai")),
     (8000, ("vllm",)),
     (1234, ("lmstudio",)),
+    (8888, ("unsloth",)),
 ]
 
 
@@ -396,6 +397,50 @@ class LmStudioAdapter(Adapter):
         return self._finish(rec)
 
 
+class UnslothAdapter(Adapter):
+    """Unsloth Studio (`unsloth studio`, default 127.0.0.1:8888). /api/health needs no key and names the
+    service ("Unsloth UI Backend"), which also tells it apart from a Jupyter server on 8888. The
+    OpenAI-compatible /v1/models needs a Studio API key: set api_key_env (UNSLOTH_STUDIO_AUTH_TOKEN by
+    default) to list the loaded models; without one the card is up and says a key is needed."""
+    type = "unsloth"
+    default_port = 8888
+
+    def __init__(self, url, key=None, label=None, parent=None, api_key_env=None):
+        super().__init__(url, key, label, parent, api_key_env or "UNSLOTH_STUDIO_AUTH_TOKEN")
+
+    @classmethod
+    def fingerprint(cls, url):
+        try:
+            r = urllib.request.urlopen(
+                urllib.request.Request(url + "/api/health"),
+                timeout=TIMEOUT_LOCAL if _is_local(url) else TIMEOUT_REMOTE)
+            body = json.loads(r.read().decode("utf-8", "replace"))
+        except Exception:
+            return False
+        return isinstance(body, dict) and "unsloth" in str(body.get("service", "")).lower()
+
+    def poll(self):
+        try:
+            health = self.get_json("/api/health")
+        except Exception:
+            return self._finish({"up": False, "state": "error"})
+        if health.get("status") != "healthy":
+            return self._finish({"up": False, "state": "error"})
+        rec = {"up": True, "state": "idle"}
+        try:
+            data = self.get_json("/v1/models").get("data") or []
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                rec["reason"] = "API key needed for models (%s)" % self.api_key_env
+            return self._finish(rec)
+        except Exception:
+            return self._finish(rec)
+        rec["models"] = [{"id": m.get("id"), "loaded": True, "size_bytes": None, "ctx": None,
+                          "expires": None} for m in data if isinstance(m, dict)]
+        rec["state"] = "running" if rec["models"] else "idle"
+        return self._finish(rec)
+
+
 class OpenAIAdapter(Adapter):
     type = "openai"
     default_port = None
@@ -525,6 +570,7 @@ ADAPTERS = {
     "llamacpp": LlamaCppAdapter,
     "vllm": VllmAdapter,
     "lmstudio": LmStudioAdapter,
+    "unsloth": UnslothAdapter,
     "openai": OpenAIAdapter,
     "custom": CustomAdapter,
 }
@@ -532,7 +578,7 @@ ADAPTERS = {
 # card labels for engines found by discovery (configured engines use
 # their [[engine]] name)
 TYPE_LABELS = {"ollama": "Ollama", "llamacpp": "llama.cpp", "vllm": "vLLM",
-               "lmstudio": "LM Studio", "openai": "OpenAI"}
+               "lmstudio": "LM Studio", "unsloth": "Unsloth", "openai": "OpenAI"}
 
 
 def make_adapter(eng, port=None):
@@ -547,6 +593,7 @@ def make_adapter(eng, port=None):
                          ).geturl()
     a = cls(url=url or None, key=eng.get("name"), label=eng.get("name"),
             parent=eng.get("parent"), api_key_env=eng.get("api_key_env"))
+    a.optional = bool(eng.get("optional"))   # down is normal: no alert (speculum.toml)
     if isinstance(a, CustomAdapter):
         a.health = eng.get("health")
         a.models = eng.get("models")

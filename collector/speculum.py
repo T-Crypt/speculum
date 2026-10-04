@@ -119,6 +119,7 @@ class State:
 
 
 S = State()
+STARTED = time.time()    # this collector's start, so replayed request lists do not re-announce old requests
 # History defaults to a no-op so imports and tests never touch the disk;
 # main() swaps in a real History from cfg["history"]["retention_days"].
 HIST = history._Noop()
@@ -433,8 +434,8 @@ def llama_swap_poll():
             sw["up"] = running is not None
             sw["label"], sw["origin"] = "llama.cpp", "llama-swap"
             sw["backend"] = None      # the running model's proxy, set below
-            sw["reason"] = None if running is not None else (
-                "llama-swap not answering on %s" % LLAMA_SWAP.split("//", 1)[-1])
+            sw["reason"] = None if running is not None else (      # the card's origin says llama-swap
+                "not answering on %s" % LLAMA_SWAP.split("//", 1)[-1])
         if running is not None:
             # model spans for history: diff the running set (key, model)
             models_now = []
@@ -898,7 +899,9 @@ def strata_thread():
                 strata_json_into(e, sj)
         if sj:
             for rec in reversed(strata_requests(sj)):     # oldest first, so the feed stays newest-first
-                if add_request(rec):
+                # Strata lists its recent requests on every poll, so a collector restart sees them all
+                # again: history dedupes them, and only ones that finished since this start get an event
+                if add_request(rec) and rec["t"] >= STARTED - 5:
                     push_event("req", "req done · strata · ↑%s ↓%s · cache %s%% · %.1fs"
                                % (fmtk(rec["prompt"]), fmtk(rec["output"]),
                                   rec["cache_pct"] if rec["cache_pct"] is not None else "—",
@@ -1323,6 +1326,7 @@ def on_engine_result(a, rec):
                 e["counters"] = rec["counters"]
             if rec.get("models"):
                 e["models"] = rec["models"]
+            e["reason"] = rec.get("reason")        # e.g. Unsloth: an API key is needed for models
             clear_alert("engine %s down" % a.label)
         else:
             e["up"] = False
@@ -1332,7 +1336,10 @@ def on_engine_result(a, rec):
             e["queue"] = None
             e["sessions"] = []
             e["mtp"] = None
-            add_alert("engine %s down" % a.label)
+            e["reason"] = rec.get("reason") or "not running on %s" % a.url.split("//", 1)[-1]
+            # optional = true (an app started now and then, e.g. LM Studio): a card, no alert
+            if not getattr(a, "optional", False):
+                add_alert("engine %s down" % a.label)
 
 
 def start_scheduler(cfg):

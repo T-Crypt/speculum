@@ -36,6 +36,25 @@ output_tokens = "myengine_generated_tokens_total"
 prompt_tokens = "myengine_prompt_tokens_total"
 queue         = "myengine_requests_waiting"
 
+# Apps you start now and then: `optional = true` keeps a card that says "not running" and raises
+# no alert while they are down.
+#
+# [[engine]]
+# name     = "LM Studio"
+# type     = "lmstudio"
+# url      = "http://127.0.0.1:1234"
+# optional = true
+#
+# Unsloth Studio (`unsloth studio`, default port 8888). /api/health needs no key; listing its models
+# does: make an API key in Studio's settings and put it in UNSLOTH_STUDIO_AUTH_TOKEN (the default).
+#
+# [[engine]]
+# name        = "Unsloth"
+# type        = "unsloth"
+# url         = "http://127.0.0.1:8888"
+# optional    = true
+# api_key_env = "UNSLOTH_STUDIO_AUTH_TOKEN"
+
 # Secrets stay out of this file: name the environment variable that
 # holds the bearer token and Speculum sends it as Authorization.
 #

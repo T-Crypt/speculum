@@ -48,7 +48,7 @@ def _clean_engine(e):
     or unknown tables (a [[engine]] with no type is an error, not a
     discovery candidate)."""
     out = {}
-    for k in ("name", "type", "url", "parent", "api_key_env",
+    for k in ("name", "type", "url", "parent", "api_key_env", "optional",
               "health", "models", "metrics", "slots", "map"):
         if k in e:
             out[k] = e[k]
