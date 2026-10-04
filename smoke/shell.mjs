@@ -92,7 +92,7 @@ for (const [id, cls] of Object.entries({
   'p-kpi': 'g-kpi', 'p-throughput': 'g-throughput', 'p-gpu': 'g-gpu',
   'p-context': 'g-context', 'p-ledger': 'g-ledger', 'p-requests': 'g-requests',
   'p-engines': 'g-engines', 'p-events': 'g-events', 'p-pool': 'g-pool',
-  'p-timeline': 'g-timeline', 'p-storage': 'g-storage',
+  'p-timeline': 'g-timeline', 'p-storage': 'g-storage', 'p-leader': 'g-leader',
 })) {
   const n = new FakeEl(id === 'deck' ? 'main' : id === 'foot' ? 'footer' : 'section');
   n.setAttribute('id', id);

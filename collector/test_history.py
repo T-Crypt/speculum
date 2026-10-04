@@ -640,6 +640,33 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(row, (1000.0, 4260))
         h.close()
 
+    def test_leaderboard_and_prune_now(self):
+        h = self.mkhist()
+        t = self.clock.t
+        for i, tps in enumerate((100.0, 120.0, 140.0)):
+            h.add_request({"t": t - 600 + i, "origin": "strata", "model": "M", "prompt": 1000,
+                           "cache": 900, "fresh": 100, "output": 50, "decode_tps": tps,
+                           "mtp_acc": 7, "mtp_tot": 10})
+        h.add_request({"t": t - 500, "origin": "ninfer", "model": "N", "prompt": 10, "output": 5})
+        h.flush()
+        conn = sqlite3.connect(self.path)
+        with conn:
+            conn.execute("INSERT OR REPLACE INTO rollup_1m (minute, engine, requests, output, gpu_w_avg) "
+                         "VALUES (?, 'strata', 3, 150, 300.0)", (int(t - 600) // 60 * 60,))
+        conn.close()
+        rows = h.leaderboard("24h")
+        top = rows[0]
+        self.assertEqual((top["engine"], top["model"], top["requests"], top["output"]), ("strata", "M", 3, 150))
+        self.assertEqual(top["decode_tps_median"], 120.0)
+        self.assertEqual(top["cache_pct"], 90.0)
+        self.assertEqual(top["mtp_pct"], 70.0)
+        self.assertEqual(top["tok_per_wh"], 30.0)        # 150 tokens / (300 W x 60 s = 5 Wh)
+        self.assertIsNone(rows[1]["tok_per_wh"])         # no rollup for ninfer
+        with self.assertRaises(ValueError):
+            h.leaderboard("2h")
+        self.assertTrue(h.prune_now())
+        h.close()
+
     # ------------------------------------------------------------ export
 
     def test_export_json_and_csv(self):

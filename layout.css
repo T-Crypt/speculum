@@ -29,6 +29,7 @@
 .g-ledger     { grid-column: 5 / 9; }
 .g-storage    { grid-column: 9 / 13; }
 .g-requests   { grid-column: 1 / -1; }
+.g-leader     { grid-column: 1 / -1; }
 .g-events     { grid-column: 1 / 8; }
 .g-pool       { grid-column: 8 / 13; }
 
@@ -67,6 +68,7 @@
 .deck.view-basic .g-engines    { grid-area: eng; }
 .deck.view-basic .g-timeline   { grid-area: tl; }
 .deck.view-basic .g-storage,
+.deck.view-basic .g-leader,
 .deck.view-basic .g-context,
 .deck.view-basic .g-ledger,
 .deck.view-basic .g-requests,
@@ -191,7 +193,7 @@
      its own row, the cluster below it, and the toggle is the item that wraps onto
      a row of its own — nothing is clipped, so the page never scrolls sideways.
      Above 768 px the bar stays a single 48 px row. */
-  .g-kpi, .g-throughput, .g-gpu, .g-context, .g-ledger, .g-timeline, .g-storage,
+  .g-kpi, .g-throughput, .g-gpu, .g-context, .g-ledger, .g-timeline, .g-storage, .g-leader,
   .g-requests, .g-engines, .g-events, .g-pool { grid-column: 1 / -1; }
   .g-engines { grid-template-columns: 1fr; }
   /* Basic at one column: four stacked rows, in DOM order */

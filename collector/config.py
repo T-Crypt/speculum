@@ -23,6 +23,7 @@ DEFAULTS = {
     # Threshold alerts (DESIGN.md section 3), each held for hold_s before it fires. vram_pct is high on
     # purpose: engines fill the card by design; the useful VRAM alert is a foreign process holding it.
     "alerts": {"vram_pct": 99, "gpu_temp_c": 83, "queue": 8, "hold_s": 30, "foreign_vram_mib": 512,
+               "idle_vram_min": 30,     # an engine holding VRAM with no request this long is flagged on its card
                "engine_processes": ["llama-server", "ninfer-serve", "strata", "ollama"]},
     "engine": [],
 }

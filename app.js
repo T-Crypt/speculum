@@ -235,6 +235,7 @@ function syncEnginesFromTick(d) {
     if (t.window) e.window = t.window;
     if (t.backend) e.backend = t.backend;
     e.reason = t.reason || null;
+    e.idle_vram = t.idle_vram || null;
     if (t.hist) state.engHist[e.key] = [...t.hist];
     if (t.rate != null) pushHist(state.engHist[e.key], t.rate);
     else if (t.rates) {
@@ -1364,6 +1365,8 @@ function buildEngines() {
       c.sub.textContent = [
         e.origin || '—',
         e.window ? `${fmtTok(e.window)} ctx` : null,
+        /* DESIGN section 3 feature 4: holding VRAM with no request for idle_vram_min (collector) */
+        e.idle_vram ? `idle ${Math.round(e.idle_vram.idle_s / 60)} min · ${(e.idle_vram.mib / 1024).toFixed(1)} GB VRAM` : null,
         e.reason || e.backend || (e.up === true ? 'local' : 'no backend'),
       ].filter(Boolean).join(' · ');
       c.card.classList.toggle('is-muted', info.muted);
@@ -1593,6 +1596,56 @@ function buildTimeline() {
   };
 }
 
+/* --- per-model leaderboard -------------------------------------------------------- */
+/* Requests, tokens, median decode, cache hit, MTP and tokens per watt-hour per (engine, model) over
+   a range (GET /api/leaderboard). Energy is whole-card GPU power over the engine's busy minutes, idle
+   draw included: it compares setups on this box, not models in the abstract. */
+function buildLeaderboard() {
+  const lb = { range: '24h', data: null, at: 0, fetching: false, error: false };
+  const p = makePanel('p-leader', 'Leaderboard', 'per model · energy is whole-card GPU power over busy minutes', {
+    tools: Segmented(TL_RANGES.map(r => ({ value: r.value, label: r.label })), lb.range, v => {
+      lb.range = v; lb.data = null; lb.at = 0;
+    }),
+  });
+  const dt = DataTable({ caption: 'Per-model leaderboard', columns: [
+    { label: 'Model' }, { label: 'Engine' }, { label: 'Requests', num: true }, { label: 'Output', num: true },
+    { label: 'Median decode', num: true }, { label: 'Cache hit', num: true }, { label: 'MTP', num: true },
+    { label: 'Tokens / Wh', num: true },
+  ] });
+  const note = el('p', { class: 'tl-note', hidden: true });
+  p.body.append(note, dt.wrap);
+  function poll() {
+    if (DEMO || lb.fetching || Date.now() - lb.at < 60000) return;
+    lb.fetching = true;
+    fetch('api/leaderboard?range=' + lb.range, { cache: 'no-store' })
+      .then(x => { if (!x.ok) throw new Error('http ' + x.status); return x.json(); })
+      .then(d => { lb.data = d; lb.error = false; })
+      .catch(() => { lb.error = true; })
+      .finally(() => { lb.fetching = false; lb.at = Date.now(); });
+  }
+  p.render = () => {
+    poll();
+    const rows = lb.data && lb.data.range === lb.range ? lb.data.rows || [] : [];
+    const msg = DEMO ? 'leaderboard needs the collector'
+      : !lb.data ? (lb.error ? 'leaderboard needs the collector' : 'loading…')
+      : rows.length ? '' : 'no requests in this range';
+    note.textContent = msg;
+    note.hidden = !msg;
+    const sig = lb.range + '|' + lb.at + '|' + rows.length;
+    if (p.el.dataset.sig === sig) return sig;
+    p.el.dataset.sig = sig;
+    /* numeric cells carry col-num like their headers, so values line up under them */
+    const num = v => ({ text: v != null ? v : '—', cls: 'col-num' });
+    const pct = v => num(v != null ? fmtNum(v, 1) + '%' : null);
+    dt.tbody.replaceChildren(...rows.map(r => TableRow([
+      { text: r.model, title: r.model }, r.engine, num(fmtNum(r.requests, 0)), num(fmtTok(r.output)),
+      num(r.decode_tps_median != null ? fmtNum(r.decode_tps_median, 1) + ' t/s' : null),
+      pct(r.cache_pct), pct(r.mtp_pct), num(r.tok_per_wh != null ? fmtNum(r.tok_per_wh, 0) : null),
+    ])));
+    return sig;
+  };
+}
+
 /* --- history storage ------------------------------------------------------------- */
 /* The SQLite history's size and growth (GET /api/storage): what 30 / 60 / 90 days of retention cost on
    this box, the current choice highlighted. Fetched on load and every 5 minutes. */
@@ -1626,6 +1679,17 @@ function buildStorage() {
     }
     const row = (k, v, cls) => el('div', { class: 'sto-row' + (cls ? ' ' + cls : '') }, el('span', {}, k), el('b', {}, v));
     const proj = d.projection || {};
+    /* export the last 24 h (the API caps at 50,000 rows), and apply the retention now */
+    const prune = el('button', { class: 'btn', type: 'button', onclick: () => {
+      if (!confirm(`Delete history older than ${d.retention_days} days now? (It runs daily anyway.)`)) return;
+      fetch('api/prune', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+        .then(x => x.json()).then(r => { if (r.storage) { sto.data = r.storage; sto.at = Date.now(); p.el.dataset.sig = ''; } })
+        .catch(() => {});
+    } }, 'Prune now');
+    const actions = el('div', { class: 'sto-actions' },
+      el('a', { class: 'btn', href: 'api/export?range=24h&format=csv', download: 'speculum-24h.csv' }, 'Export CSV'),
+      el('a', { class: 'btn', href: 'api/export?range=24h&format=json', download: 'speculum-24h.json' }, 'Export JSON'),
+      prune);
     body.replaceChildren(
       row('Size', fmtBytes(d.bytes)),
       row('Retention', d.retention_days + ' days'),
@@ -1634,7 +1698,8 @@ function buildStorage() {
         el('div', { class: 'sto-cell' + (String(d.retention_days) === n ? ' is-current' : '') },
           el('span', {}, n + ' d'), el('b', {}, fmtBytes(proj[n]))))),
       row('Rows', Object.entries(d.rows || {}).map(([k, v]) => `${k} ${fmtNum(v, 0)}`).join(' · '), 'sto-rows'),
-      el('p', { class: 'sto-path', title: d.path || '' }, d.path || ''));
+      el('p', { class: 'sto-path', title: d.path || '' }, d.path || ''),
+      actions);
     return sig;
   };
 }
@@ -1688,6 +1753,7 @@ buildContext();
 buildTimeline();
 buildStorage();
 buildRequests();
+buildLeaderboard();
 buildEngines();
 buildEvents();
 buildPool();

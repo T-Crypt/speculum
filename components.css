@@ -807,3 +807,13 @@ html[data-ripple="on"] .panel.is-rippling::after {
 .sto-cell.is-current { border-color: var(--accent); background: var(--accent-soft); }
 .sto-cell.is-current b { color: var(--accent-high); }
 .sto-path { margin: 0; font-size: var(--fs-meta); color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sto-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: var(--sp-1); }
+/* plain action button / link, the Settings button's look (storage panel: export, prune) */
+.btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-family: inherit; font-size: var(--fs-label); font-weight: 500;
+  color: var(--text-2); background: var(--surface-2);
+  border: 1px solid var(--border); border-radius: var(--r-ctl);
+  padding: 4px 10px; cursor: pointer; text-decoration: none;
+}
+.btn:hover { border-color: var(--border-strong); color: var(--text-1); }

@@ -69,3 +69,14 @@ def test_threshold_alerts():
                                     procs + [(26460, "node", 2270)])     # the zvec-grep squatter, 2026-09-27
     assert set(hot) == {"GPU temperature over 83 °C", "VRAM over 99%", "queue over 8 on llama.cpp",
                         "foreign VRAM: node (pid 26460) holds 2270 MiB"}
+
+
+def test_idle_vram():
+    procs = [(1, "strata", 23898.0), (2, "ollama", 300.0), (3, "llama-server", 21000.0), (4, "node", 2270.0)]
+    t, started = 100_000.0, 90_000.0
+    last = {"strata": t - 40 * 60, "llama": t - 5 * 60}
+    flags = speculum.idle_vram(procs, last, t, 30 * 60, started)
+    assert set(flags) == {"strata"}                  # llama busy recently, ollama < 1 GiB, node not an engine
+    assert flags["strata"] == {"mib": 23898, "idle_s": 2400}
+    # nothing served since the collector started: idle counts from the start, not from the epoch
+    assert speculum.idle_vram(procs, {}, started + 600, 30 * 60, started) == {}

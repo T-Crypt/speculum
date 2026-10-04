@@ -976,6 +976,39 @@ def threshold_alerts(cfg, gpu, engines_, procs):
     return out
 
 
+# GPU process name -> engine key, for the idle-VRAM flag (DESIGN.md section 3 feature 4)
+PROC_ENGINE = (("llama-server", "llama"), ("ninfer-serve", "ninfer"), ("strata", "strata"), ("ollama", "ollama"))
+
+
+def idle_vram(procs, last_req, t, idle_s, started):
+    """{engine key: {"mib", "idle_s"}} for engine processes holding >= 1 GiB of VRAM whose engine has
+    served nothing for idle_s (counted from the collector's start when it has served nothing since).
+    Pure; idle_vram_pass writes it onto the cards."""
+    out = {}
+    for pid, name, mib in procs:
+        key = next((k for pat, k in PROC_ENGINE if pat in name.lower()), None)
+        if key is None or mib < 1024:
+            continue
+        idle = t - max(last_req.get(key) or 0, started)
+        if idle >= idle_s:
+            out[key] = {"mib": int(mib) + int((out.get(key) or {}).get("mib", 0)), "idle_s": int(idle)}
+    return out
+
+
+def idle_vram_pass(procs, t):
+    last = {}
+    with lock:
+        for r in S.requests:
+            k = r.get("origin")
+            k = {"swap": "llama"}.get(k, k)
+            if r.get("t") and (r["t"] > (last.get(k) or 0)):
+                last[k] = r["t"]
+    flags = idle_vram(procs, last, t, 60 * ALERTS.get("idle_vram_min", 30), STARTED)
+    with lock:
+        for k, e in S.engines.items():
+            e["idle_vram"] = flags.get(k)
+
+
 def alerts_thread():
     """Threshold alerts: a condition must hold for hold_s before it is raised, and clears when it ends."""
     since, raised, procs, last_procs = {}, set(), [], 0.0
@@ -986,6 +1019,7 @@ def alerts_thread():
         with lock:
             gpu = dict(S.gpu.get("last") or {})
             engs = [dict(e) for e in S.engines.values()]
+        idle_vram_pass(procs, t)
         now_on = threshold_alerts(ALERTS, gpu, engs, procs)
         for msg in now_on:
             since.setdefault(msg, t)
@@ -1143,6 +1177,7 @@ def snapshot():
                 "window": e.get("window"), "sessions": e.get("sessions", []),
                 "service_unavailable": e.get("service_unavailable", 0),
                 "counters": e.get("counters"), "reason": e.get("reason"),
+                "idle_vram": e.get("idle_vram"),
                 "hist": list(S.eng_hist.get(k, ()))[-HIST_SECONDS:],
             } for k, e in S.engines.items()},
             "strata": {
@@ -1185,6 +1220,7 @@ def tick():
                 "queue": e.get("queue"), "rates": e.get("rates"),
                 "mtp": e.get("mtp"), "sessions": e.get("sessions", []),
                 "counters": e.get("counters"), "reason": e.get("reason"),
+                "idle_vram": e.get("idle_vram"),
                 "rate": ((S.eng_hist.get(k) or [None])[-1]
                          if S.eng_hist.get(k) else None),
             } for k, e in S.engines.items()},
@@ -1226,6 +1262,8 @@ class Handler(BaseHTTPRequestHandler):
             self._requests_api(query)
         elif path == "/api/spans":
             self._spans(query)
+        elif path == "/api/leaderboard":
+            self._leaderboard(query)
         elif path == "/api/storage":
             self._storage()
         elif path == "/api/export":
@@ -1262,6 +1300,40 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": str(e)}, 500)
             return
         self._json({"range": range_, "engine": engine, "rows": rows})
+
+    def _leaderboard(self, query):
+        range_ = (urllib.parse.parse_qs(query).get("range") or ["24h"])[0]
+        try:
+            rows = HIST.leaderboard(range_)
+        except ValueError as e:          # unknown range -> 400
+            self._json({"error": str(e)}, 400)
+            return
+        except Exception as e:
+            self._json({"error": str(e)}, 500)
+            return
+        self._json({"range": range_, "rows": rows})
+
+    def do_POST(self):
+        """POST /api/prune: apply the history retention now. Only with a JSON content type, so a form
+        on another site cannot trigger it from a browser; it deletes nothing newer than retention."""
+        path = self.path.partition("?")[0]
+        n = int(self.headers.get("Content-Length") or 0)
+        if n:
+            self.rfile.read(min(n, 4096))
+        if path != "/api/prune":
+            self._json({"error": "not found"}, 404)
+            return
+        if not (self.headers.get("Content-Type") or "").startswith("application/json"):
+            self._json({"error": "Content-Type must be application/json"}, 415)
+            return
+        try:
+            done = HIST.prune_now()
+        except Exception as e:
+            self._json({"error": str(e)}, 500)
+            return
+        if done:
+            push_event("info", "history pruned to %d days" % HIST.retention_days)
+        self._json({"pruned": done, "storage": HIST.storage()})
 
     def _spans(self, query):
         range_ = (urllib.parse.parse_qs(query).get("range") or ["24h"])[0]

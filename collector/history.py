@@ -214,6 +214,12 @@ class _Noop:
     def spans(self, range_):
         return []
 
+    def leaderboard(self, range_):
+        return []
+
+    def prune_now(self):
+        return False
+
     def storage(self):
         return {"enabled": False, "path": None, "bytes": 0,
                 "retention_days": 0, "rows": {},
@@ -792,6 +798,66 @@ class History:
             conn.close()
         # explicit keys (not _row_to_dict, which drops None): an open span says unloaded_at: null
         return [dict(zip(("engine", "model", "loaded_at", "unloaded_at"), r)) for r in rows]
+
+    def leaderboard(self, range_):
+        """Per (engine, model) over the range, from the request rows: requests, tokens, median decode
+        tok/s, cache hit, MTP acceptance; plus the engine's tokens per watt-hour from the minute
+        rollups (GPU power x 60 s over the minutes it served requests; whole-card power, idle draw
+        included, so it measures this box, not the model alone). Busiest first."""
+        if not self._enabled:
+            return []
+        if range_ not in RANGES:
+            raise ValueError("range must be one of %s" % sorted(RANGES))
+        cutoff = int(self._clock() - RANGES[range_])
+        conn = self._reader()
+        try:
+            reqs = conn.execute(
+                "SELECT engine, model, prompt, cached, output, decode_tps, mtp_acc, mtp_tot "
+                "FROM requests WHERE t >= ?", (cutoff,)).fetchall()
+            energy = dict(((e, (wh, out)) for e, wh, out in conn.execute(
+                "SELECT engine, SUM(gpu_w_avg) / 60.0, SUM(output) FROM rollup_1m "
+                "WHERE minute >= ? AND requests > 0 AND gpu_w_avg IS NOT NULL GROUP BY engine",
+                (cutoff,))))
+        finally:
+            conn.close()
+        groups = {}
+        for eng, model, prompt, cached, out, dtps, acc, tot in reqs:
+            g = groups.setdefault((eng or "?", model or "?"), {
+                "requests": 0, "prompt": 0, "cached": 0, "output": 0, "tps": [], "acc": 0, "tot": 0})
+            g["requests"] += 1
+            g["prompt"] += prompt or 0
+            g["cached"] += cached or 0
+            g["output"] += out or 0
+            if dtps:
+                g["tps"].append(dtps)
+            g["acc"] += acc or 0
+            g["tot"] += tot or 0
+        rows = []
+        for (eng, model), g in groups.items():
+            tps = sorted(g["tps"])
+            med = None
+            if tps:
+                m = len(tps) // 2
+                med = tps[m] if len(tps) % 2 else (tps[m - 1] + tps[m]) / 2.0
+            wh, eout = energy.get(eng, (None, None))
+            rows.append({
+                "engine": eng, "model": model, "requests": g["requests"], "prompt": g["prompt"],
+                "output": g["output"],
+                "decode_tps_median": round(med, 1) if med is not None else None,
+                "cache_pct": round(100.0 * g["cached"] / g["prompt"], 1) if g["prompt"] else None,
+                "mtp_pct": round(100.0 * g["acc"] / g["tot"], 1) if g["tot"] else None,
+                "tok_per_wh": round(eout / wh, 1) if wh and eout else None,
+            })
+        rows.sort(key=lambda r: (-r["output"], -r["requests"]))
+        return rows
+
+    def prune_now(self):
+        """Apply the retention now instead of at the daily run (the storage panel's prune button).
+        Deletes nothing newer than retention_days."""
+        if not self._enabled:
+            return False
+        self._prune()
+        return True
 
     def _request_rows(self, since, limit):
         """Unclamped fetch (export uses it with EXPORT_CAP); requests()
