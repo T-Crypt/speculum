@@ -112,6 +112,9 @@ globalThis.window = { devicePixelRatio: 2, addEventListener() {} };
 globalThis.matchMedia = () => mq;
 globalThis.location = { search: MODE === 'demo' ? '?demo' : '' };
 const store = new Map();
+/* seed the persisted view: Basic skips the paint work of the hidden panels, so
+   the panel assertions below need Advanced (the demo co-process inherits this) */
+if (process.env.SPECULUM_SMOKE_VIEW) store.set('speculum.ui.view', process.env.SPECULUM_SMOKE_VIEW);
 globalThis.localStorage = {
   getItem: k => (store.has(k) ? store.get(k) : null),
   setItem: (k, v) => store.set(k, String(v)),
@@ -279,9 +282,29 @@ if (MODE === 'live') {
 } else {
   ok(pill.className === 'status-pill' && pill.getAttribute('data-state') === 'live', 'Demo: pill is live right after boot');
 }
-ok(cluster.children.length === 6, 'Cluster: pill + 4 kv chips + settings menu');
+ok(cluster.children.length === 7, 'Cluster: pill + 4 kv chips + view control + settings menu');
 ok(docById.get('tb-gpu') && docById.get('tb-driver') && docById.get('tb-uptime') && docById.get('tb-feed'), 'GPU/driver/uptime/feed chips exist');
-const menuEl = cluster.children[5];
+const viewCtl = cluster.children[5];
+ok(viewCtl.className === 'segmented' && viewCtl.children.length === 2, 'View segmented control: Basic / Advanced');
+ok(viewCtl.children[0].textContent === 'Basic' && viewCtl.children[1].textContent === 'Advanced', 'View control labels');
+ok(viewCtl.getAttribute('aria-label') === 'Panel view' &&
+   viewCtl.children.every(b => b.tagName === 'button' && b.getAttribute('aria-pressed') !== null), 'View control a11y (group + aria-pressed buttons)');
+const seeded = process.env.SPECULUM_SMOKE_VIEW || 'basic';
+ok(localStorage.getItem('speculum.ui.view') === (process.env.SPECULUM_SMOKE_VIEW || null), 'View default is not written until chosen');
+ok(docById.get('deck').className.includes('view-' + seeded) &&
+   viewCtl.children[seeded === 'basic' ? 0 : 1].getAttribute('aria-pressed') === 'true',
+   `View at boot: ${seeded} applied to #deck before first paint, and pressed`);
+if (seeded === 'basic') {
+  /* the ledger always writes its 4 rows when it renders, so an empty tbody
+     here means the paint loop skipped a panel Basic does not show */
+  const lTbody = allTag(docById.get('p-ledger'), 'tbody')[0];
+  ok(lTbody && lTbody.children.length === 0,
+     'Basic: hidden panels do no paint work (ledger tbody still empty)');
+}
+viewCtl.children[1]._listeners.click[0]();
+ok(docById.get('deck').className.includes('view-advanced') &&
+   localStorage.getItem('speculum.ui.view') === 'advanced', 'Advanced applies to #deck + persists');
+const menuEl = cluster.children[6];
 ok(menuEl.className === 'menu' && menuEl.children[1].hidden === true, 'Settings menu present, closed');
 ok(menuEl.children[1].children.length === 3, 'Settings menu: theme, motion, ripple rows');
 ok(menuEl.children[0].getAttribute('aria-haspopup') === 'menu', 'Menu button a11y');
@@ -404,7 +427,7 @@ if (MODE === 'live') {
   /* second boot: ?demo co-process, panels must render there too */
   const demo = await new Promise(resolve => {
     const c = spawn(process.execPath, [new URL(import.meta.url).pathname], {
-      env: { ...process.env, SPECULUM_SMOKE_MODE: 'demo' },
+      env: { ...process.env, SPECULUM_SMOKE_MODE: 'demo', SPECULUM_SMOKE_VIEW: 'advanced' },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let out = '';

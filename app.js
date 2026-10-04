@@ -439,6 +439,9 @@ const ui = {
   theme: prefs.theme,
   motion: prefs.reduceMotion,
   ripple: prefs.ripple,
+  /* ?view=basic|advanced overrides the stored choice for this page (bookmarkable), without saving it */
+  view: ['basic', 'advanced'].includes(new URLSearchParams(location.search).get('view'))
+    ? new URLSearchParams(location.search).get('view') : prefs.view,   // 'basic' | 'advanced'
   panels: [],   // panel modules register: { el, head, chip }
 };
 
@@ -450,6 +453,19 @@ function applyMotion() {
   if (ui.motion === 'on') root.dataset.motion = 'reduced';
   else delete root.dataset.motion;
   applyRippleSetting(); // ripple must track the effective motion state
+}
+
+/* --- view (Basic / Advanced, persisted under speculum.ui.view) -------------- */
+/* Basic is the everyday four: KPI, throughput, GPU & host, engines. Advanced
+   shows all nine sections. The class on #deck drives layout.css; p.hidden
+   keeps the paint loop off the sections that are not shown. */
+const BASIC_PANELS = new Set(['p-kpi', 'p-throughput', 'p-gpu', 'p-engines']);
+function panelVisible(p) { return ui.view === 'advanced' || BASIC_PANELS.has(p.id); }
+function applyView() {
+  const deck = $('#deck');
+  deck.classList.toggle('view-basic', ui.view === 'basic');
+  deck.classList.toggle('view-advanced', ui.view === 'advanced');
+  for (const p of ui.panels) p.hidden = !panelVisible(p);
 }
 
 /* --- top bar ----------------------------------------------------------------- */
@@ -465,6 +481,10 @@ function buildTopbar() {
   const pill = StatusPill({ state: 'paused', label: 'Booting' });
   const chip = (id, label, cls = '') => el('span', { class: 'kv' + (cls ? ' ' + cls : '') },
     label, el('b', { id }, '—'));
+  const viewCtl = Segmented([{ value: 'basic', label: 'Basic' }, { value: 'advanced', label: 'Advanced' }], ui.view, v => {
+    ui.view = v; prefs.view = v; applyView();
+  });
+  viewCtl.setAttribute('aria-label', 'Panel view');
   const menu = Menu('Settings', [
     settingsRow('Theme', null,
       Segmented([{ value: 'dark', label: 'Dark' }, { value: 'light', label: 'Light' }], ui.theme, v => {
@@ -488,6 +508,7 @@ function buildTopbar() {
       chip('tb-driver', 'Driver', 'hide-sm'),
       chip('tb-uptime', 'Uptime'),
       chip('tb-feed', 'Feed'),
+      viewCtl,
       menu.el,
     ),
   );
@@ -517,11 +538,12 @@ function renderFoot() {
 }
 
 /* --- panel registry (panel modules push themselves in) ----------------------- */
-function registerPanel(p) { ui.panels.push(p); return p; }
+function registerPanel(p) { p.hidden = !panelVisible(p); ui.panels.push(p); return p; }
 function setPanelsStale() {
   const now = performance.now();
   const info = state.mode === 'demo' ? null : staleInfo(feed.lastTick, now);
   for (const p of ui.panels) {
+    if (p.hidden) continue;
     p.el.classList.toggle('is-stale', !!info);
     if (p.chip) p.chip.textContent = info ? staleLabel(info) : 'Stale';
   }
@@ -1367,6 +1389,7 @@ function paint() {
   /* panel paint hooks register here: p.paint(state, { reduced }) may return a
      signature string — the panel pulses only when it changes */
   for (const p of ui.panels) {
+    if (p.hidden) continue;   // Basic: sections not shown do no paint work
     if (p.paint) {
       const sig = p.paint(state, { reduced: motionReduced() });
       if (typeof sig === 'string') panelPulse(p, sig);
@@ -1378,7 +1401,7 @@ function renderText() {
   renderTopbar();
   renderFoot();
   setPanelsStale();
-  for (const p of ui.panels) if (p.render) p.render(state);
+  for (const p of ui.panels) if (!p.hidden && p.render) p.render(state);
 }
 
 /* --- keys ------------------------------------------------------------------------ */
@@ -1399,6 +1422,7 @@ addEventListener('keydown', e => {
 applyTheme();
 applyMotion();
 applyRippleSetting();
+applyView();      // class on #deck before first paint; panels get the flag at registration
 buildTopbar();
 buildKpi();
 buildThroughput();

@@ -197,6 +197,9 @@ ok(store.get('speculum.ui.ripple') === 'off', 'prefs.ripple persists to localSto
 ui.prefs.theme = 'light';
 ok(store.get('speculum.ui.theme') === 'light', 'prefs.theme persists');
 ok(ui.prefs.reduceMotion === 'system', 'reduceMotion default = system');
+ok(ui.prefs.view === 'basic', 'view default = basic');
+ui.prefs.view = 'advanced';
+ok(store.get('speculum.ui.view') === 'advanced', 'prefs.view persists');
 
 console.log(fails === 0 ? '\nALL PASS' : `\n${fails} FAILURES`);
 process.exit(fails ? 1 : 0);

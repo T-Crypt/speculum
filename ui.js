@@ -19,6 +19,8 @@ export const prefs = {
   set ripple(v) { save('ripple', v); },
   get reduceMotion() { return load('motion', 'system'); }, // 'system' | 'on'
   set reduceMotion(v) { save('motion', v); },
+  get view() { return load('view', 'basic'); },             // 'basic' | 'advanced'
+  set view(v) { save('view', v); },
 };
 
 /* --- tokens --------------------------------------------------------------- */

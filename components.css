@@ -485,6 +485,10 @@
   color: var(--accent);
   background: var(--accent-soft);
 }
+/* the same primitive in the top bar (Basic / Advanced): it must not shrink in
+   the status cluster, and reads as a control rather than as meta text */
+.topbar .segmented { flex: none; white-space: nowrap; }
+.topbar .segmented button { font-size: var(--fs-label); padding: 4px 10px; }
 
 /* --- ripple (optional; see ripple.js) ----------------------------------------------------------- */
 /* a single 400ms radial pulse on data update; off unless <html data-ripple="on"> */

@@ -39,6 +39,29 @@
   align-content: start;
 }
 
+/* --- Basic view (the class is set on #deck by app.js) ------------------------ */
+/* Basic shows KPI, throughput, GPU & host and engines; the five Advanced-only
+   shells are display:none, so the areas below hold no empty cell. Paired
+   panels share a row and stretch to the same height: the shell passes the row
+   height down to its panel. Advanced keeps the grid above unchanged. */
+.deck.view-basic {
+  grid-template-areas:
+    "kpi kpi kpi kpi kpi kpi kpi kpi kpi kpi kpi kpi"
+    "tp tp tp tp tp tp gpu gpu gpu gpu gpu gpu"
+    "eng eng eng eng eng eng eng eng eng eng eng eng";
+}
+.deck.view-basic .g-kpi        { grid-area: kpi; }
+.deck.view-basic .g-throughput { grid-area: tp; }
+.deck.view-basic .g-gpu        { grid-area: gpu; }
+.deck.view-basic .g-engines    { grid-area: eng; }
+.deck.view-basic .g-context,
+.deck.view-basic .g-ledger,
+.deck.view-basic .g-requests,
+.deck.view-basic .g-events,
+.deck.view-basic .g-pool { display: none; }
+.deck.view-basic > section { display: flex; }
+.deck.view-basic > section > .panel { flex: 1; }
+
 /* --- top bar (48px, full-bleed hairline over the centred deck) -------------- */
 .topbar {
   position: sticky;
@@ -123,6 +146,14 @@
   .g-pool { grid-column: 1 / 7; }
   .g-gpu    { grid-column: 1 / 4; }
   .g-ledger { grid-column: 4 / 7; }
+  /* Basic at 6 columns: KPI full row, throughput + GPU share one (3 + 3),
+     engines full row — nothing left empty */
+  .deck.view-basic {
+    grid-template-areas:
+      "kpi kpi kpi kpi kpi kpi"
+      "tp tp tp gpu gpu gpu"
+      "eng eng eng eng eng eng";
+  }
 }
 
 @media (max-width: 768px) {
@@ -137,6 +168,8 @@
   .g-kpi, .g-throughput, .g-gpu, .g-context, .g-ledger,
   .g-requests, .g-engines, .g-events, .g-pool { grid-column: 1 / -1; }
   .g-engines { grid-template-columns: 1fr; }
+  /* Basic at one column: four stacked rows, in DOM order */
+  .deck.view-basic { grid-template-areas: "kpi" "tp" "gpu" "eng"; }
   .topbar { gap: var(--sp-2); padding: 0 var(--sp-2); }
   .topbar .brand span { display: none; }
   .topbar .cluster { gap: var(--sp-2); }
