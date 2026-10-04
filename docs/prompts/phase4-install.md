@@ -20,7 +20,7 @@ no config needed (with no `speculum.toml` the collector probes localhost and sho
 - Checks: `python3` >= 3.9 on PATH (print the version found and stop with a clear message if missing or older);
   `nvidia-smi` optional (warn that the GPU panel will say "no GPU" without it).
 - Installs the systemd **user** unit from `collector/speculum.service` into `~/.config/systemd/user/`, rewriting
-  `ExecStart` to this checkout's absolute path (do not assume `~/test/glass-monitor`), then
+  `ExecStart` to this checkout's absolute path (do not assume `~/speculum`), then
   `systemctl --user daemon-reload` and `systemctl --user enable --now speculum`.
 - Waits up to 15 s for `http://127.0.0.1:8792/api/storage` to answer and prints the URL.
 - Flags: `--uninstall` (disable, stop, remove the unit; never delete the history database or the config, say where
