@@ -583,6 +583,9 @@ html[data-ripple="on"] .panel.is-rippling::after {
 .tp-tip .row { display: flex; align-items: center; gap: 6px; }
 .tp-tip .row b { margin-left: auto; color: var(--text-1); font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .tp-tip .swatch { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+/* quiet chart-area note for a DB range with nothing to draw (no backend, or a
+   failed/empty history read) — muted, never red */
+.tp-note { font-size: var(--fs-meta); color: var(--text-3); margin: 0 0 var(--sp-1); }
 
 /* GPU readouts */
 .readout-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-3) var(--sp-5); }

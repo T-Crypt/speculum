@@ -89,7 +89,12 @@ export function el(tag, attrs = {}, ...children) {
     else if (k === 'data') for (const [dk, dv] of Object.entries(v)) n.dataset[dk] = dv;
     else if (k === 'aria') for (const [ak, av] of Object.entries(v)) n.setAttribute('aria-' + ak, av);
     else if (k.startsWith('on') && typeof v === 'function') n.addEventListener(k.slice(2), v);
-    else if (k === 'style') Object.assign(n.style, v);
+    else if (k === 'style') {
+      /* custom properties (--swatch) only take via setProperty; Object.assign drops them silently */
+      for (const [sk, sv] of Object.entries(v)) {
+        if (sk.startsWith('--') && n.style.setProperty) n.style.setProperty(sk, sv); else n.style[sk] = sv;
+      }
+    }
     else n.setAttribute(k, v);
   }
   for (const c of children.flat()) {

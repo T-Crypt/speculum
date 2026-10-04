@@ -158,6 +158,13 @@ function fetchSnap() {
   return r.then(x => { if (!x.ok) throw new Error('http ' + x.status); return x.json(); });
 }
 
+/* history rollups for the Throughput DB ranges (DESIGN.md §2): rows are
+   per-minute for 6h/24h and per-hour for 7d/30d, oldest first */
+function fetchHistory(range) {
+  const r = fetch('api/history?range=' + range, { cache: 'no-store' });
+  return r.then(x => { if (!x.ok) throw new Error('http ' + x.status); return x.json(); });
+}
+
 function applySnapshot(s) {
   state.gpu = normGpu(s.gpu && s.gpu.last);
   state.host = normHost(s.host);
@@ -625,13 +632,17 @@ function buildKpi() {
 
 /* --- P2 · Throughput ------------------------------------------------------------ */
 /* 1-s-resolution canvas: one line per registry engine (series color), 4 y
-   gridlines, hover crosshair + tooltip; range 15m/1h/6h/24h (24h capped by
-   the 60-min ring buffer — the drawn line spans what exists, right-anchored). */
+   gridlines, hover crosshair + tooltip; range 15m/1h/6h/24h/7d/30d.
+   15m/1h read the 60-min in-memory ring (the drawn line spans what exists,
+   right-anchored); 6h and longer read the collector's SQLite rollups through
+   /api/history, one fetch per selected range and at most one per minute. */
 const TP_RANGES = [
   { value: '15m', label: '15m', sec: 900 },
   { value: '1h', label: '1h', sec: 3600 },
-  { value: '6h', label: '6h', sec: 21600 },
-  { value: '24h', label: '24h', sec: 86400 },
+  { value: '6h', label: '6h', sec: 21600, db: true, bucket: 60 },
+  { value: '24h', label: '24h', sec: 86400, db: true, bucket: 60 },
+  { value: '7d', label: '7d', sec: 604800, db: true, bucket: 3600 },
+  { value: '30d', label: '30d', sec: 2592000, db: true, bucket: 3600 },
 ];
 function tpRangeSec(v) { const r = TP_RANGES.find(x => x.value === v); return r ? r.sec : 3600; }
 function niceTicks(max, n = 4) {
@@ -672,14 +683,30 @@ function runsOf(arr) {
   return runs;
 }
 /* x-axis labels relative to now: minutes for the 15 m / 1 h ranges
-   ("-15m" "-10m" "-5m" "now", "-60m" … "now"), hours for 6 h / 24 h */
+   ("-15m" "-10m" "-5m" "now", "-60m" … "now"), whole hours for the 6 h / 24 h
+   DB ranges, whole days for 7 d / 30 d (thinned so the axis stays readable) */
 function tpXTicks(sec) {
+  if (sec > 3600) {
+    const u = sec > 86400 ? 86400 : 3600;
+    const thin = sec > 604800 ? 5 : sec > 86400 ? 2 : sec > 21600 ? 6 : 2;
+    const out = [];
+    for (let k = sec / u; k > 0; k -= thin) out.push({ frac: (sec - k * u) / sec, label: `−${k}${u === 86400 ? 'd' : 'h'}` });
+    out.push({ frac: 1, label: 'now' });
+    return out;
+  }
   const n = sec <= 900 ? 3 : 4;
   const step = sec / n;
   const unit = s => (s >= 3600 ? `${s / 3600}h` : `${Math.round(s / 60)}m`);
   const out = [];
   for (let i = 0; i <= n; i++) out.push({ frac: i / n, label: i === n ? 'now' : '−' + unit((n - i) * step) });
   return out;
+}
+/* same labels for the tooltip header, over a DB range (bucket-snapped) */
+function tpRelLabel(sec) {
+  if (sec <= 0) return 'now';
+  if (sec >= 86400) return '−' + Math.round(sec / 86400) + 'd';
+  if (sec >= 3600) return '−' + Math.round(sec / 3600) + 'h';
+  return '−' + Math.round(sec / 60) + 'm';
 }
 function buildThroughput() {
   const p = makePanel('p-throughput', 'Throughput', 'decode tok/s per engine · 1 s samples, 8 s smoothed', {
@@ -691,10 +718,12 @@ function buildThroughput() {
   const wrap = el('div', { class: 'tp-wrap' });
   const canvas = el('canvas', { class: 'tp-canvas', 'aria-label': 'Throughput per engine over time' });
   const tip = el('div', { class: 'tp-tip', hidden: true });
-  wrap.append(canvas, tip);
+  const note = el('p', { class: 'tp-note', hidden: true });
+  wrap.append(note, canvas, tip);
   const legend = el('div', { class: 'legend', 'aria-label': 'Engine legend' });
   p.body.append(wrap, legend);
-  const tp = { range: '1h', canvas, wrap, tip, legend, legendDirty: true, geo: null, hoverX: null };
+  const tp = { range: '1h', canvas, wrap, tip, legend, legendDirty: true, geo: null, hoverX: null,
+    hist: null, histAt: 0, histError: false, fetching: false, note, noteText: '' };
   canvas.addEventListener('mousemove', e => {
     const r = canvas.getBoundingClientRect();
     tp.hoverX = Math.max(0, Math.min(r.width, e.clientX - r.left));
@@ -703,12 +732,46 @@ function buildThroughput() {
     tp.hoverX = null;
     tip.hidden = true;
   });
+  const setNote = txt => {
+    if (tp.noteText === txt) return;   // the paint loop runs 5 Hz: write only on change
+    tp.noteText = txt;
+    tp.note.hidden = !txt;
+    tp.note.textContent = txt || '';
+  };
+  /* one history fetch per selected DB range, then at most once a minute while
+     that range stays selected; a failed fetch keeps the rows already drawn */
+  function tpPoll(R) {
+    if (DEMO || tp.fetching) return;
+    if (tp.hist && tp.hist.range === R.value && performance.now() - tp.histAt < 60000) return;
+    tp.fetching = true;
+    fetchHistory(R.value).then(j => {
+      tp.hist = { range: R.value, rows: Array.isArray(j.rows) ? j.rows : [] };
+      tp.histError = false;
+    }).catch(() => { tp.histError = true; }).finally(() => {
+      tp.histAt = performance.now();
+      tp.fetching = false;
+    });
+  }
   p.onData = () => { tp.legendDirty = true; };
+  const hintEl = p.el.querySelector('.panel-hint');
   p.paint = st => {
     const reg = buildEngineRegistry(st.engines);
+    const Rh = TP_RANGES.find(x => x.value === tp.range) || TP_RANGES[1];
+    const hint = Rh.db ? `decode tok/s per engine · ${Rh.bucket >= 3600 ? 'hourly' : 'per-minute'} averages from history`
+                       : 'decode tok/s per engine · 1 s samples, 8 s smoothed';
+    if (hintEl && hintEl.textContent !== hint) hintEl.textContent = hint;
+    /* history keeps engines that are not running now (NInfer when ninfer-serve is stopped): they get a
+       line after the registry's, in the next series colours, and a muted "history" legend item */
+    const hrowsAll = Rh.db && tp.hist && tp.hist.range === Rh.value ? tp.hist.rows : [];
+    const past = [...new Set(hrowsAll.map(r => r.engine))].filter(k => k && !reg.byKey.has(k)).sort();
+    const pastKey = past.join(',');
+    if (pastKey !== tp.pastKey) { tp.pastKey = pastKey; tp.legendDirty = true; }
     if (tp.legendDirty) {
       tp.legendDirty = false;
-      tp.legend.replaceChildren(...reg.list.map(e => {
+      tp.legend.replaceChildren(...past.map((k, j) => el('span', { class: 'legend-item legend-item--past' },
+        el('span', { class: 'swatch', style: { '--swatch': seriesColor(reg.list.length + j) } }),
+        k, Badge({ status: 'neutral', label: 'history', dot: false, muted: true, swatch: null }))),
+      ...reg.list.map(e => {
         const info = engineState(e);
         return el('span', { class: 'legend-item' },
           el('span', { class: 'swatch', style: { '--swatch': seriesColor(reg.byKey.get(e.key).colorIndex) } }),
@@ -723,17 +786,60 @@ function buildThroughput() {
     const iw = w - pad.l - pad.r, ih = h - pad.t - pad.b;
     const series = [];
     let max = 0;
-    for (const e of reg.list) {
-      const full = st.engHist[e.key] || [];
-      const data = full.slice(-R.sec);
-      const sm = emaSmooth(full).slice(-R.sec);
-      for (const v of sm) if (isFinite(v) && v > max) max = v;
-      series.push({ e, data, sm, color: seriesColor(reg.byKey.get(e.key).colorIndex) });
+    if (R.db) {
+      tpPoll(R);
+      const hrows = tp.hist && tp.hist.range === R.value ? tp.hist.rows : [];
+      if (!hrows.length) {
+        setNote(DEMO || tp.histError ? 'history needs the collector' : 'no history rows in this range');
+        ctx.clearRect(0, 0, w, h);
+        tp.geo = null;
+        tip.hidden = true;
+        return R.value + '|no history';
+      }
+      setNote('');
+      /* one bucket per rollup row across the whole range; a bucket with no row
+         is zero, never interpolated across */
+      const n = Math.round(R.sec / R.bucket);
+      const base = ((st.t && st.t > 1e9) ? st.t : Date.now() / 1000) - R.sec;
+      for (const e of reg.list) {
+        const buckets = new Array(n).fill(0);
+        for (const row of hrows) {
+          if (row.engine !== e.key) continue;
+          const t = row.minute != null ? row.minute : row.hour;
+          if (t == null) continue;
+          const i = Math.floor((t - base) / R.bucket);
+          if (i < 0 || i >= n) continue;
+          buckets[i] = row.decode_tps_avg || 0;
+        }
+        for (const v of buckets) if (isFinite(v) && v > max) max = v;
+        series.push({ e, data: buckets, sm: buckets, color: seriesColor(reg.byKey.get(e.key).colorIndex) });
+      }
+      past.forEach((k, j) => {
+        const buckets = new Array(n).fill(0);
+        for (const row of hrows) {
+          if (row.engine !== k) continue;
+          const t = row.minute != null ? row.minute : row.hour;
+          const i = t == null ? -1 : Math.floor((t - base) / R.bucket);
+          if (i >= 0 && i < n) buckets[i] = row.decode_tps_avg || 0;
+        }
+        for (const v of buckets) if (isFinite(v) && v > max) max = v;
+        series.push({ e: { key: k, label: k }, data: buckets, sm: buckets, color: seriesColor(reg.list.length + j) });
+      });
+    } else {
+      for (const e of reg.list) {
+        const full = st.engHist[e.key] || [];
+        const data = full.slice(-R.sec);
+        const sm = emaSmooth(full).slice(-R.sec);
+        for (const v of sm) if (isFinite(v) && v > max) max = v;
+        series.push({ e, data, sm, color: seriesColor(reg.byKey.get(e.key).colorIndex) });
+      }
     }
     const ticks = niceTicks(Math.max(max, 1));
     const yMax = ticks[ticks.length - 1];
-    /* x for index i of a right-anchored series of length n over R.sec seconds */
-    const xAt = (i, n) => pad.l + iw - ((n - 1 - i) / Math.max(1, R.sec - 1)) * iw;
+    /* x for index i of a right-anchored series of length n over R.sec seconds
+       (the DB arrays span the whole range, so their index maps straight across) */
+    const xAt = (i, n) => R.db ? pad.l + (i / Math.max(1, n - 1)) * iw
+      : pad.l + iw - ((n - 1 - i) / Math.max(1, R.sec - 1)) * iw;
     const yAt = v => pad.t + ih - (v / yMax) * ih;
     ctx.clearRect(0, 0, w, h);
     ctx.font = `10px ${cssVar('--font-mono')}`;
@@ -809,7 +915,9 @@ function buildThroughput() {
       ctx.beginPath(); ctx.moveTo(gx, pad.t); ctx.lineTo(gx, pad.t + ih); ctx.stroke();
       const secAgo = Math.round((pad.l + iw - gx) / iw * (R.sec - 1));
       const rows = [];
-      let html = `<span class="t">${secAgo === 0 ? 'now' : '−' + secAgo + 's'}</span>`;
+      const head = R.db ? tpRelLabel(Math.round(secAgo / R.bucket) * R.bucket)
+        : (secAgo === 0 ? 'now' : '−' + secAgo + 's');
+      let html = `<span class="t">${head}</span>`;
       for (const s of series) {
         const n = s.data.length;
         if (!n) continue;
