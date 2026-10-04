@@ -189,6 +189,19 @@ anything that loads a model.
 4. Windows host backend, `install.sh`, `install.ps1`.
 5. README rewrite, preview placeholder, network section; later features 4 to 8 above.
 
+## Handoff (2026-10-04)
+
+**Phase 3 done** (37ec7ce .. 5d37a6c): Basic/Advanced toggle (`?view=`), gap-free grid in both views, engine cards
+for every engine with a down reason (llama.cpp via llama-swap always; NInfer only while ninfer-serve answers /metrics;
+Strata from its 0.1.38 JSON /metrics; Ollama, LM Studio, Unsloth Studio; `optional = true` for apps started now and
+then), throughput range from the database (6h/24h/7d/30d), threshold alerts (foreign VRAM process, GPU temperature,
+queue, VRAM 99%) with an alert strip, model load timeline (/api/spans), storage panel. 48 collector tests; smoke has
+two failures that predate Phase 3 ("KPI strip has 10 sparklines", "Engine cards = payload engine count").
+
+**Not done from section 3:** idle-VRAM flag (feature 4), energy per token (5), per-model leaderboard (6), export of
+the selected range from the UI (7; the API exists), a prune button (8; needs an endpoint).
+**Next: Phase 4** (Windows host backend, install.sh / install.ps1), then Phase 5 (README, network section).
+
 ## Handoff (2026-10-03, for the next session)
 
 **State 2026-10-03 afternoon:** Phase 1 done (`09f26a4`; 1b, folding the old threads in, still open). Phase 2 done:
