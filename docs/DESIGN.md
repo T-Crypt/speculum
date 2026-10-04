@@ -198,8 +198,10 @@ then), throughput range from the database (6h/24h/7d/30d), threshold alerts (for
 queue, VRAM 99%) with an alert strip, model load timeline (/api/spans), storage panel. 48 collector tests; smoke has
 two failures that predate Phase 3 ("KPI strip has 10 sparklines", "Engine cards = payload engine count").
 
-**Not done from section 3:** idle-VRAM flag (feature 4), energy per token (5), per-model leaderboard (6), export of
-the selected range from the UI (7; the API exists), a prune button (8; needs an endpoint).
+**Section 3 extras done (3e772a0):** idle-VRAM card flag (4), tokens per Wh in the leaderboard (5), per-model
+leaderboard (6), export buttons for the last 24 h (7), Prune now (8, POST /api/prune). Known gaps: export is fixed to
+24 h (not the panel's range); the two smoke failures that predate Phase 3 are still open; KV pool beside Events leaves
+space when there are few slots.
 **Next: Phase 4** (Windows host backend, install.sh / install.ps1), then Phase 5 (README, network section).
 
 ## Handoff (2026-10-03, for the next session)
