@@ -1403,41 +1403,71 @@ def main():
         HIST.close()                   # flush pending rows, close the db
 
 
+def ninfer_serve_port():
+    """The port of a running ninfer-serve process (started by hand, not by llama-swap), or None.
+    ninfer-serve listens on --port, default 8080 (its serve_options)."""
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            argv = open("/proc/%s/cmdline" % pid, "rb").read().split(b"\0")
+        except OSError:
+            continue
+        if not argv or b"ninfer-serve" not in os.path.basename(argv[0]):
+            continue
+        return ninfer_port_of([a.decode("utf-8", "replace") for a in argv])
+    return None
+
+
+def ninfer_port_of(args):
+    """ninfer-serve's listening port from its argv: --port N / --port=N, else its default 8080."""
+    for i, a in enumerate(args):
+        if a == "--port" and i + 1 < len(args) and args[i + 1].isdigit():
+            return int(args[i + 1])
+        if a.startswith("--port=") and a.split("=", 1)[1].isdigit():
+            return int(a.split("=", 1)[1])
+    return 8080
+
+
+def ninfer_backend():
+    """(model, backend URL) of a live ninfer-serve: llama-swap's proxy for its NInfer entry, else a
+    ninfer-serve process run by hand; (None, None) when there is none."""
+    try:
+        running = jget(LLAMA_SWAP + "/running", timeout=PROBE_FAST).get("running", [])
+    except Exception:
+        running = []
+    for r in running:
+        if "ninfer" in (r.get("cmd") or "") or "NInfer" in (r.get("model") or ""):
+            return (r.get("model") or "NInfer",
+                    (r.get("proxy") or "").replace("localhost", "127.0.0.1") or None)
+    port = ninfer_serve_port()
+    return ("NInfer", "http://127.0.0.1:%d" % port) if port else (None, None)
+
+
+def drop_ninfer():
+    """NInfer has a card only while ninfer-serve answers /metrics (operator, 2026-10-03)."""
+    with lock:
+        S.engines.pop("ninfer", None)
+        S.eng_hist.pop("ninfer", None)
+
+
 def ninfer_backend_poll():
-    """Poll /metrics + /slots of whichever NInfer backend llama-swap is proxying."""
+    """Poll /metrics + /slots of the live ninfer-serve, whether llama-swap or a person started it."""
     label = None
     prev = None
     prev_t = None
     while True:
-        running = []
-        try:
-            running = jget(LLAMA_SWAP + "/running", timeout=PROBE_FAST).get("running", [])
-        except Exception:
+        model, backend = ninfer_backend()
+        if backend is None:
+            drop_ninfer()
+            label = prev = prev_t = None
             time.sleep(2.0)
             continue
-        entry = None
-        for r in running:
-            if "ninfer" in (r.get("cmd") or "") or "NInfer" in (r.get("model") or ""):
-                entry = r
-                break
-        if entry is None:
-            e = S.engine("ninfer", "NInfer", "ninfer")
-            with lock:
-                e["up"] = False
-                e["backend"] = None
-                e["rates"] = None
-                e["sessions"] = []
-            time.sleep(2.0)
-            continue
-        model = entry.get("model") or "NInfer"
         if model != label:
             label = model
             prev = prev_t = None
-            push_event("info", "NInfer backend · %s · %s" % (model, entry.get("proxy")))
-        backend = (entry.get("proxy") or "").replace("localhost", "127.0.0.1")
+            push_event("info", "NInfer backend · %s · %s" % (model, backend))
         window = 262144
-        e = S.engine("ninfer", model, "ninfer", window)
-        e["backend"] = backend or None
         counters = None
         slots = []
         rates = None
@@ -1474,7 +1504,14 @@ def ninfer_backend_poll():
                     "processing": bool(s.get("is_processing")),
                     "retained": s.get("retained"),
                 })
+        if counters is None:              # not serving metrics (yet): no card, not a "down" one
+            drop_ninfer()
+            prev = prev_t = None
+            time.sleep(2.0)
+            continue
+        e = S.engine("ninfer", model, "ninfer", window)
         with lock:
+            e["backend"] = backend
             if counters is not None:
                 e["up"] = True
                 e["counters"] = counters
@@ -1484,9 +1521,6 @@ def ninfer_backend_poll():
                 da = counters.get("ninfer:draft_accepted_tokens_total") or 0
                 e["mtp"] = round(100.0 * da / d, 1) if d else None
                 clear_alert("backend %s unreachable" % model)
-            else:
-                e["up"] = False
-                add_alert("backend %s unreachable" % model)
             e["rates"] = rates
             e["slots"] = ses
             e["sessions"] = ses

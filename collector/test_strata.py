@@ -47,3 +47,11 @@ def test_strata_cache_never_exceeds_prompt():
                                       "output_tokens": 10, "prompt_ms": 50.0}]}
     r = speculum.strata_requests(sj)[0]
     assert r["cache"] == 63780 and r["fresh"] == 120 and r["cache_pct"] <= 100.0
+
+
+def test_ninfer_port_from_argv():
+    assert speculum.ninfer_port_of(["/home/x/ninfer-serve-46645ada", "model.ninfer", "--port", "5803",
+                                    "--kv-dtype", "rk4v4-e8"]) == 5803
+    assert speculum.ninfer_port_of(["ninfer-serve", "m.ninfer", "--port=18099"]) == 18099
+    assert speculum.ninfer_port_of(["ninfer-serve", "m.ninfer"]) == 8080
+    assert speculum.ninfer_port_of(["ninfer-serve", "--port", "--host"]) == 8080
