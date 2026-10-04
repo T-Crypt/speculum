@@ -337,12 +337,16 @@ class History:
         conn.execute("PRAGMA user_version = %d" % SCHEMA_VERSION)
 
     def _close_open_spans(self):
-        """Spans left open by a previous run: close at loaded_at, the last
-        known time, so no span covers the collector's own downtime."""
+        """Spans left open by a previous run: close at the previous run's last
+        sign of life, the end of its newest minute rollup (written every minute,
+        idle ones too), or at loaded_at when there is none - never inside the
+        collector's own downtime. Closing at loaded_at alone turned every load
+        that outlived a collector restart into a zero-length span."""
         try:
             with self._db:
                 self._db.execute(
-                    "UPDATE model_spans SET unloaded_at = loaded_at "
+                    "UPDATE model_spans SET unloaded_at = MAX(loaded_at, COALESCE("
+                    "(SELECT MAX(minute) + 60 FROM rollup_1m), loaded_at)) "
                     "WHERE unloaded_at IS NULL")
         except sqlite3.Error as e:
             self._log_cb("history: close-open-spans: %s" % e)

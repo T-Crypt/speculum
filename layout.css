@@ -24,8 +24,10 @@
 .g-kpi        { grid-column: 1 / -1; }
 .g-throughput { grid-column: 1 / 8; }
 .g-context    { grid-column: 8 / 13; }
-.g-gpu        { grid-column: 1 / 7; }
-.g-ledger     { grid-column: 7 / 13; }
+.g-timeline   { grid-column: 1 / -1; }
+.g-gpu        { grid-column: 1 / 5; }
+.g-ledger     { grid-column: 5 / 9; }
+.g-storage    { grid-column: 9 / 13; }
 .g-requests   { grid-column: 1 / -1; }
 .g-events     { grid-column: 1 / 8; }
 .g-pool       { grid-column: 8 / 13; }
@@ -56,12 +58,15 @@
   grid-template-areas:
     "kpi kpi kpi kpi kpi kpi kpi kpi kpi kpi kpi kpi"
     "tp tp tp tp tp tp gpu gpu gpu gpu gpu gpu"
+    "tl tl tl tl tl tl tl tl tl tl tl tl"
     "eng eng eng eng eng eng eng eng eng eng eng eng";
 }
 .deck.view-basic .g-kpi        { grid-area: kpi; }
 .deck.view-basic .g-throughput { grid-area: tp; }
 .deck.view-basic .g-gpu        { grid-area: gpu; }
 .deck.view-basic .g-engines    { grid-area: eng; }
+.deck.view-basic .g-timeline   { grid-area: tl; }
+.deck.view-basic .g-storage,
 .deck.view-basic .g-context,
 .deck.view-basic .g-ledger,
 .deck.view-basic .g-requests,
@@ -152,12 +157,14 @@
   .g-pool { grid-column: 1 / 7; }
   .g-gpu    { grid-column: 1 / 4; }
   .g-ledger { grid-column: 4 / 7; }
+  .g-storage { grid-column: 1 / 7; }   /* its own row at 6 columns, GPU + ledger keep theirs */
   /* Basic at 6 columns: KPI full row, throughput + GPU share one (3 + 3),
      engines full row — nothing left empty */
   .deck.view-basic {
     grid-template-areas:
       "kpi kpi kpi kpi kpi kpi"
       "tp tp tp gpu gpu gpu"
+      "tl tl tl tl tl tl"
       "eng eng eng eng eng eng";
   }
 }
@@ -184,11 +191,11 @@
      its own row, the cluster below it, and the toggle is the item that wraps onto
      a row of its own — nothing is clipped, so the page never scrolls sideways.
      Above 768 px the bar stays a single 48 px row. */
-  .g-kpi, .g-throughput, .g-gpu, .g-context, .g-ledger,
+  .g-kpi, .g-throughput, .g-gpu, .g-context, .g-ledger, .g-timeline, .g-storage,
   .g-requests, .g-engines, .g-events, .g-pool { grid-column: 1 / -1; }
   .g-engines { grid-template-columns: 1fr; }
   /* Basic at one column: four stacked rows, in DOM order */
-  .deck.view-basic { grid-template-areas: "kpi" "tp" "gpu" "eng"; }
+  .deck.view-basic { grid-template-areas: "kpi" "tp" "gpu" "tl" "eng"; }
   .topbar { gap: var(--sp-2); padding: 0 var(--sp-2); }
   .topbar .brand span { display: none; }
   .topbar .cluster { gap: var(--sp-2); }

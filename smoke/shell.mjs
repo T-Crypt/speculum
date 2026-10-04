@@ -88,10 +88,11 @@ class FakeEl {
 /* pre-create the shells index.html provides */
 const preRefs = {};
 for (const [id, cls] of Object.entries({
-  topbar: 'topbar', deck: 'deck', foot: 'foot',
+  topbar: 'topbar', deck: 'deck', foot: 'foot', alerts: 'alert-strip',
   'p-kpi': 'g-kpi', 'p-throughput': 'g-throughput', 'p-gpu': 'g-gpu',
   'p-context': 'g-context', 'p-ledger': 'g-ledger', 'p-requests': 'g-requests',
   'p-engines': 'g-engines', 'p-events': 'g-events', 'p-pool': 'g-pool',
+  'p-timeline': 'g-timeline', 'p-storage': 'g-storage',
 })) {
   const n = new FakeEl(id === 'deck' ? 'main' : id === 'foot' ? 'footer' : 'section');
   n.setAttribute('id', id);
@@ -329,8 +330,9 @@ ok(root.dataset.motion === 'reduced', 'data-motion=reduced set');
 ok(store.get('speculum.ui.motion') === 'on', 'Motion choice persisted');
 
 /* deck shells */
-const ids = ['p-kpi', 'p-throughput', 'p-gpu', 'p-context', 'p-ledger', 'p-requests', 'p-engines', 'p-events', 'p-pool'];
-ok(ids.every(id => docById.get(id)), 'All 9 panel shells present');
+const ids = ['p-kpi', 'p-throughput', 'p-gpu', 'p-context', 'p-ledger', 'p-requests', 'p-engines', 'p-events', 'p-pool',
+             'p-timeline', 'p-storage'];
+ok(ids.every(id => docById.get(id)), 'All 11 panel shells present');
 ok(ids.every(id => docById.get(id).className.startsWith('g-')), 'Shells carry grid classes');
 ok(docById.get('foot').textContent.includes('pause'), 'Foot shows key help');
 

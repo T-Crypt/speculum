@@ -625,6 +625,21 @@ class HistoryTests(unittest.TestCase):
             h.spans("2h")
         h.close()
 
+    def test_open_span_closes_at_last_rollup_not_loaded_at(self):
+        """A load that outlives a collector restart keeps its length up to the old run's last minute."""
+        h = self.mkhist()
+        h.model_loaded("strata", "m", 1000.0)
+        h.flush()
+        h.close()
+        conn = sqlite3.connect(self.path)
+        with conn:
+            conn.execute("INSERT INTO rollup_1m (minute, engine) VALUES (?, ?)", (4200, "strata"))
+        conn.close()
+        h = self.mkhist()                       # restart: the open span is closed here
+        (row,) = rows_of_closed(self.path, "SELECT loaded_at, unloaded_at FROM model_spans WHERE model = 'm'")
+        self.assertEqual(row, (1000.0, 4260))
+        h.close()
+
     # ------------------------------------------------------------ export
 
     def test_export_json_and_csv(self):

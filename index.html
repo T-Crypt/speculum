@@ -18,12 +18,15 @@ addEventListener('unhandledrejection',function(e){var r=e.reason;show('rejection
 <body>
   <header class="topbar" id="topbar" aria-label="Monitor status"></header>
 
+  <div class="alert-strip" id="alerts" role="status" aria-live="polite" hidden></div>
   <main class="deck" id="deck">
     <section class="g-kpi"        id="p-kpi"        aria-label="Key metrics"></section>
     <section class="g-throughput" id="p-throughput" aria-label="Throughput"></section>
     <section class="g-gpu"        id="p-gpu"        aria-label="GPU and host"></section>
     <section class="g-context"    id="p-context"    aria-label="Context residency"></section>
+    <section class="g-timeline"   id="p-timeline"   aria-label="Model load timeline"></section>
     <section class="g-ledger"     id="p-ledger"     aria-label="Token ledger"></section>
+    <section class="g-storage"    id="p-storage"    aria-label="History storage"></section>
     <section class="g-requests"   id="p-requests"   aria-label="Request history"></section>
     <section class="g-engines"    id="p-engines"    aria-label="Engines"></section>
     <section class="g-events"     id="p-events"     aria-label="Events"></section>

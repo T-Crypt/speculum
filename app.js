@@ -473,7 +473,7 @@ function applyMotion() {
 /* Basic is the everyday four: KPI, throughput, GPU & host, engines. Advanced
    shows all nine sections. The class on #deck drives layout.css; p.hidden
    keeps the paint loop off the sections that are not shown. */
-const BASIC_PANELS = new Set(['p-kpi', 'p-throughput', 'p-gpu', 'p-engines']);
+const BASIC_PANELS = new Set(['p-kpi', 'p-throughput', 'p-gpu', 'p-timeline', 'p-engines']);
 function panelVisible(p) { return ui.view === 'advanced' || BASIC_PANELS.has(p.id); }
 function applyView() {
   const deck = $('#deck');
@@ -1499,6 +1499,146 @@ function buildPool() {
   };
 }
 
+/* --- alert strip -------------------------------------------------------------- */
+/* Active alerts (engine down, foreign VRAM, GPU temperature, queue) listed under the top bar in both
+   views; the pill alone said "Degraded" without saying why. Hidden when there are none. */
+function renderAlerts() {
+  const box = $('#alerts');
+  if (!box) return;
+  const list = state.alerts || [];
+  const sig = list.join('\n');
+  if (box.dataset.sig === sig) return;
+  box.dataset.sig = sig;
+  box.hidden = list.length === 0;
+  box.replaceChildren(...list.map(a => el('div', { class: 'alert-line' },
+    Badge({ status: 'warn', label: 'alert', dot: true }), el('span', { class: 'alert-msg' }, a))));
+}
+
+function fmtBytes(b) {
+  if (b == null || !isFinite(b)) return '—';
+  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0;
+  while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; }
+  return (i ? b.toFixed(b < 10 ? 1 : 0) : String(Math.round(b))) + ' ' + u[i];
+}
+
+/* --- model load timeline -------------------------------------------------------- */
+/* One lane per engine, one bar per load span (GET /api/spans), coloured like the engine's throughput
+   line. Fetched on select and at most once a minute; the DOM is rebuilt only when the data, the range
+   or the minute changes. */
+const TL_RANGES = [
+  { value: '6h', label: '6h', sec: 21600 }, { value: '24h', label: '24h', sec: 86400 },
+  { value: '7d', label: '7d', sec: 604800 }, { value: '30d', label: '30d', sec: 2592000 },
+];
+function buildTimeline() {
+  const tl = { range: '24h', data: null, at: 0, fetching: false, error: false };
+  const p = makePanel('p-timeline', 'Model timeline', 'load and unload per engine', {
+    tools: Segmented(TL_RANGES.map(r => ({ value: r.value, label: r.label })), tl.range, v => {
+      tl.range = v; tl.data = null; tl.at = 0;
+    }),
+  });
+  const lanes = el('div', { class: 'tl-lanes' });
+  const axis = el('div', { class: 'tl-axis' });
+  const note = el('p', { class: 'tl-note', hidden: true });
+  p.body.append(note, lanes, axis);
+  function poll() {
+    if (DEMO || tl.fetching || Date.now() - tl.at < 60000) return;
+    tl.fetching = true;
+    fetch('api/spans?range=' + tl.range, { cache: 'no-store' })
+      .then(x => { if (!x.ok) throw new Error('http ' + x.status); return x.json(); })
+      .then(d => { tl.data = d; tl.error = false; })
+      .catch(() => { tl.error = true; })
+      .finally(() => { tl.fetching = false; tl.at = Date.now(); });
+  }
+  p.render = st => {
+    poll();
+    const R = TL_RANGES.find(x => x.value === tl.range);
+    const spans = tl.data && tl.data.range === tl.range ? tl.data.spans || [] : [];
+    const msg = DEMO ? 'timeline needs the collector'
+      : !tl.data ? (tl.error ? 'timeline needs the collector' : 'loading…')
+      : spans.length ? '' : 'no model loads in this range';
+    note.textContent = msg;
+    note.hidden = !msg;
+    const now = (st.t && st.t > 1e9) ? st.t : Date.now() / 1000;
+    const t0 = now - R.sec;
+    const sig = tl.range + '|' + (tl.data ? spans.length + ':' + tl.at : 'none') + '|' + Math.floor(now / 60);
+    if (p.el.dataset.sig === sig) return sig;
+    p.el.dataset.sig = sig;
+    const reg = buildEngineRegistry(st.engines);
+    const keys = [...new Set(spans.map(x => x.engine))].sort();
+    const past = keys.filter(k => !reg.byKey.has(k));
+    const colorOf = k => reg.byKey.has(k) ? seriesColor(reg.byKey.get(k).colorIndex)
+      : seriesColor(reg.list.length + past.indexOf(k));
+    const labelOf = k => { const e = reg.list.find(x => x.key === k); return e ? (e.label || k) : k; };
+    const when = t => new Date(t * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    lanes.replaceChildren(...keys.map(k => {
+      const track = el('div', { class: 'tl-track' });
+      for (const sp of spans) {
+        if (sp.engine !== k) continue;
+        const a = Math.max(sp.loaded_at, t0), b = Math.min(sp.unloaded_at == null ? now : sp.unloaded_at, now);
+        if (b <= a && sp.unloaded_at != null) continue;
+        const left = (a - t0) / R.sec * 100, width = Math.max(0.3, (b - a) / R.sec * 100);
+        const dur = fmtDur(((sp.unloaded_at == null ? now : sp.unloaded_at) - sp.loaded_at) * 1000);
+        track.append(el('i', { class: 'tl-bar', style: { left: left.toFixed(2) + '%', width: width.toFixed(2) + '%', background: colorOf(k) },
+          title: `${sp.model || k} · ${when(sp.loaded_at)} → ${sp.unloaded_at == null ? 'loaded' : when(sp.unloaded_at)} · ${dur}` }));
+      }
+      return el('div', { class: 'tl-lane' }, el('span', { class: 'tl-label' }, labelOf(k)), track);
+    }));
+    const marks = 4;
+    axis.replaceChildren(...Array.from({ length: marks + 1 }, (_, i) => {
+      const ago = R.sec * (1 - i / marks);
+      return el('span', {}, i === marks ? 'now' : '−' + (R.sec >= 604800 ? Math.round(ago / 86400) + 'd' : Math.round(ago / 3600) + 'h'));
+    }));
+    return sig;
+  };
+}
+
+/* --- history storage ------------------------------------------------------------- */
+/* The SQLite history's size and growth (GET /api/storage): what 30 / 60 / 90 days of retention cost on
+   this box, the current choice highlighted. Fetched on load and every 5 minutes. */
+function buildStorage() {
+  const sto = { data: null, at: 0, fetching: false, error: false };
+  const p = makePanel('p-storage', 'Storage', 'history database');
+  const body = el('div', { class: 'sto' });
+  p.body.append(body);
+  function poll() {
+    if (DEMO || sto.fetching || Date.now() - sto.at < 300000) return;
+    sto.fetching = true;
+    fetch('api/storage', { cache: 'no-store' })
+      .then(x => { if (!x.ok) throw new Error('http ' + x.status); return x.json(); })
+      .then(d => { sto.data = d; sto.error = false; })
+      .catch(() => { sto.error = true; })
+      .finally(() => { sto.fetching = false; sto.at = Date.now(); });
+  }
+  p.render = () => {
+    poll();
+    const d = sto.data;
+    const sig = DEMO ? 'demo' : d ? JSON.stringify([d.bytes, d.retention_days, d.rows]) : (sto.error ? 'err' : 'wait');
+    if (p.el.dataset.sig === sig) return sig;
+    p.el.dataset.sig = sig;
+    if (DEMO || !d) {
+      body.replaceChildren(el('p', { class: 'sto-note' }, DEMO || sto.error ? 'storage needs the collector' : 'loading…'));
+      return sig;
+    }
+    if (!d.enabled) {
+      body.replaceChildren(el('p', { class: 'sto-note' }, 'history is off (retention_days = 0)'));
+      return sig;
+    }
+    const row = (k, v, cls) => el('div', { class: 'sto-row' + (cls ? ' ' + cls : '') }, el('span', {}, k), el('b', {}, v));
+    const proj = d.projection || {};
+    body.replaceChildren(
+      row('Size', fmtBytes(d.bytes)),
+      row('Retention', d.retention_days + ' days'),
+      row('Growth', d.bytes_per_day != null ? fmtBytes(d.bytes_per_day) + ' / day' : '—'),
+      el('div', { class: 'sto-proj' }, ...['30', '60', '90'].map(n =>
+        el('div', { class: 'sto-cell' + (String(d.retention_days) === n ? ' is-current' : '') },
+          el('span', {}, n + ' d'), el('b', {}, fmtBytes(proj[n]))))),
+      row('Rows', Object.entries(d.rows || {}).map(([k, v]) => `${k} ${fmtNum(v, 0)}`).join(' · '), 'sto-rows'),
+      el('p', { class: 'sto-path', title: d.path || '' }, d.path || ''));
+    return sig;
+  };
+}
+
 /* --- paint loop --------------------------------------------------------------- */
 function paint() {
   /* panel paint hooks register here: p.paint(state, { reduced }) may return a
@@ -1514,6 +1654,7 @@ function paint() {
 }
 function renderText() {
   renderTopbar();
+  renderAlerts();
   renderFoot();
   setPanelsStale();
   for (const p of ui.panels) if (!p.hidden && p.render) p.render(state);
@@ -1544,6 +1685,8 @@ buildThroughput();
 buildGpu();
 buildLedger();
 buildContext();
+buildTimeline();
+buildStorage();
 buildRequests();
 buildEngines();
 buildEvents();
