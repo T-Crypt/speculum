@@ -411,7 +411,7 @@ def host_thread():
 # --------------------------------------------------------------------------
 
 def strata_engine():
-    e = S.engine("strata", "Strata", "strata", 131072)
+    e = S.engine("strata", "Strata", "strata")
     e["up"] = S.strata["up"]
     return e
 
@@ -789,22 +789,44 @@ def logs_thread():
 # Strata (by hand, may be down): /v1/models, /metrics, /slots
 # --------------------------------------------------------------------------
 
+def strata_json_into(e, sj):
+    """Strata's JSON /metrics onto the engine card's fields (call with `lock` held)."""
+    eng, live, tot = sj.get("engine") or {}, sj.get("live") or {}, sj.get("totals") or {}
+    e["window"] = eng.get("max_context") or e.get("window")
+    e["queue"] = live.get("queued")
+    e["rates"] = {"decode_tps": live.get("tok_s"), "prefill_tps": live.get("prefill_tok_s_mean"),
+                  "state": live.get("state")}
+    offered = tot.get("drafts_offered") or 0
+    e["mtp"] = round(100.0 * (tot.get("drafts_accepted") or 0) / offered, 1) if offered else None
+    e["counters"] = {k: tot.get(k) for k in ("requests", "prompt_tokens", "reused", "output_tokens")}
+    e["counters"].update(kv=eng.get("kv"), kv_resident=eng.get("kv_resident"),
+                         expert_slots=eng.get("expert_slots"), vram_free_mib=eng.get("vram_free_mib"),
+                         engine_version=eng.get("version"))
+
+
 def strata_thread():
     while True:
         up = True
-        models, metrics, slots = [], {}, []
+        models, metrics, slots, sj = [], {}, [], None
         for path, sink in (("/v1/models", "models"), ("/metrics", "metrics"), ("/slots", "slots")):
             try:
                 if path == "/v1/models":
                     models = jget(STRATA + path, timeout=PROBE_SLOW).get("data", [])
                 elif path == "/metrics":
-                    metrics = parse_metrics(http_get_text(STRATA + path, timeout=PROBE_SLOW))
+                    raw = http_get_text(STRATA + path, timeout=PROBE_SLOW)
+                    # Strata 0.1.38+ answers one JSON document (engine, live, totals, requests);
+                    # older ones Prometheus-style text. Line-splitting the JSON made "{"engine":"
+                    # a counter name and left the window at a guess.
+                    if raw.lstrip().startswith("{"):
+                        sj = json.loads(raw)
+                    else:
+                        metrics = parse_metrics(raw)
                 else:
                     slots = json.loads(http_get_text(STRATA + path, timeout=PROBE_SLOW))
             except Exception:
                 up = False
                 break
-        e = S.engine("strata", "Strata", "strata", 131072)
+        e = S.engine("strata", "Strata", "strata")
         with lock:
             S.strata["up"] = up
             S.strata["models"] = [{
@@ -832,8 +854,12 @@ def strata_thread():
                 for m in models:
                     if (m.get("context_window") or 0) > (e.get("window") or 0):
                         e["window"] = m.get("context_window")
+            if sj:
+                strata_json_into(e, sj)
         if not up:
             e.pop("counters", None)
+            with lock:
+                e["rates"] = e["queue"] = e["mtp"] = None
         time.sleep(5.0)
 
 
