@@ -69,8 +69,11 @@ optional config file in `%APPDATA%\Speculum\speculum.toml`.
 file, Speculum probes the default ports on localhost and shows what it finds.
 The config sets the bind address/port, enables or disables discovery, sets the
 history retention (30/60/90 days, or 0 to turn history off), and adds engine
-adapters (`ollama`, `vllm`, `lmstudio`, `unsloth`, `openai`, `custom`) on any
-host.
+adapters on any host. Auto-discovered out of the box: `ollama`, `llamacpp`,
+`vllm`, `sglang`, `freetoken`, `lmstudio`, `unsloth`, `koboldcpp`, `tabbyapi`,
+`localai`, plus a generic `openai` fallback and a config-driven `custom` type.
+See [ENGINE-COVERAGE.md](ENGINE-COVERAGE.md) for how each engine is
+recognised and which are deliberately unsupported.
 
 **Demo** — `?demo` runs a seeded simulation with no backend at all; serve the
 directory any way you like (e.g. `python3 -m http.server 8792`) and open
@@ -186,6 +189,8 @@ Keys: `P` pause · `R` reseed (demo) / resync (live).
 | `collector/engines.py` · `collector/config.py` | engine adapters + backoff scheduler · `speculum.toml` loader |
 | `collector/speculum.service` | systemd `--user` unit (Linux; on Windows: Task Scheduler) |
 | `speculum.example.toml` | example configuration |
+| `ENGINE-COVERAGE.md` | supported inference engines, how each is recognised, and what is deliberately unsupported |
+| `STATUS.md` | current status and roadmap |
 | `smoke/` | Node DOM-stub smoke tests (no browser needed) |
 | `LICENSE` | MIT license |
 

@@ -7,3 +7,8 @@ __pycache__/
 speculum.toml
 *.db
 *.db-*
+
+# docs/ is LOCAL SCRATCH — scraped upstream READMEs, vendored source excerpts,
+# throwaway verification scripts. Never committed. Anything worth keeping goes
+# in the repo root (ENGINE-COVERAGE.md, STATUS.md) or README.md, not here.
+/docs/

@@ -1427,9 +1427,13 @@ def on_engine_result(a, rec):
 
 def start_scheduler(cfg):
     adapters = [engines.make_adapter(e) for e in cfg.get("engine") or []]
+    disc = cfg.get("discovery", {}) or {}
     sched = engines.Scheduler(
         adapters,
-        discovery_enabled=bool(cfg.get("discovery", {}).get("enabled", True)),
+        discovery_enabled=bool(disc.get("enabled", True)),
+        # localhost is always probed; `targets` adds remote hosts on the same
+        # port list, for a collector running away from the inference box.
+        discovery_hosts=disc.get("targets") or (),
         claimed_ports=claimed_ports,
         on_result=on_engine_result,
         on_event=lambda lv, m: push_event(lv, m),
