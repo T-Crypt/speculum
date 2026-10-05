@@ -105,7 +105,7 @@ url  = "http://10.0.0.41:11434"
 
 The file sets the bind address and port, discovery targets, history retention, alert thresholds, and engine adapters on any host. Discovery probes localhost first, so a local engine wins its own port. `api_key_env` names the environment variable holding a bearer token; Speculum sends it as `Authorization` and keeps the secret out of the file.
 
-Adapters: `ollama`, `llamacpp`, `vllm`, `sglang`, `freetoken`, `koboldcpp`, `tabbyapi`, `localai`, `lmstudio`, `unsloth`, `openai`, `custom`. [ENGINE-COVERAGE.md](ENGINE-COVERAGE.md) explains how each adapter recognises a server and which engines stay unsupported.
+Adapters: `ollama`, `llamacpp`, `vllm`, `sglang`, `freetoken`, `koboldcpp`, `tabbyapi`, `localai`, `lmstudio`, `unsloth`, `openai`, `custom`. [`docs/ENGINE-COVERAGE.md`](docs/ENGINE-COVERAGE.md) explains how each adapter recognises a server and which engines stay unsupported.
 
 ## Demo mode
 
@@ -163,8 +163,7 @@ The collector keeps bounded in-memory buffers: 60 minutes of GPU, host and KPI s
 | `collector/engines.py` · `collector/config.py` | engine adapters plus the backoff scheduler, `speculum.toml` loader |
 | `collector/speculum.service` | systemd `--user` unit (Linux; Task Scheduler on Windows) |
 | `speculum.example.toml` | example configuration |
-| `ENGINE-COVERAGE.md` | supported engines, how each is recognised, what stays unsupported |
-| `STATUS.md` | current status and roadmap |
+| `docs/ENGINE-COVERAGE.md` | supported engines, how each is recognised, what stays unsupported |
 | `smoke/` | Node DOM-stub smoke tests, no browser needed |
 | `LICENSE` | MIT license |
 

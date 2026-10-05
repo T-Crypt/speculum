@@ -8,7 +8,12 @@ speculum.toml
 *.db
 *.db-*
 
-# docs/ is LOCAL SCRATCH — scraped upstream READMEs, vendored source excerpts,
-# throwaway verification scripts. Never committed. Anything worth keeping goes
-# in the repo root (ENGINE-COVERAGE.md, STATUS.md) or README.md, not here.
-/docs/
+# agent context file: lives on this box, not in the published repo
+/AGENTS.md
+
+# docs/ holds committed reference docs (docs/ENGINE-COVERAGE.md). Everything
+# else under docs/ stays local: scraped upstream sources in docs/scraped/,
+# progress notes in docs/internal/. Promote anything worth publishing into
+# docs/ or README.md.
+/docs/scraped/
+/docs/internal/
