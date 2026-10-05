@@ -43,6 +43,18 @@ Python 3.11+ from python.org covers the config file; 3.9–3.10 runs without one
 
 For 24/7, create a Task Scheduler task. Action: `pythonw.exe <repo>\collector\speculum.py`. Start in the repo root, run whether the user is logged on or not, restart on failure. The history database lives in `%LOCALAPPDATA%\Speculum\speculum.db`, and an optional config file in `%APPDATA%\Speculum\speculum.toml`.
 
+### Running the collector away from the GPU box
+
+The collector is an HTTP client, so it can run in a Proxmox LXC or another container pointed at the GPU box. Add hosts under `[discovery]`:
+
+```toml
+[discovery]
+enabled = true
+targets = ["10.0.0.41", "gpu-box.lan"]
+```
+
+Discovery probes localhost first, so a local engine wins its own port. Claims are keyed on host:port, which keeps a remote 8080 discoverable while a local 8080 is taken. Remote probes use the 2 s timeout instead of the 0.3 s localhost timeout. A container without a GPU degrades cleanly: the GPU thread hits an OSError on `nvidia-smi`, marks the GPU absent, warns once, and the panels show "no data".
+
 ## What the page shows
 
 The top bar carries the overall state (Live, Degraded, Offline), GPU name, driver, host uptime, feed type, the view toggle and the settings menu. An alert strip appears under the bar while an alert holds, for example an engine latched red after a run of "service unavailable".
@@ -178,6 +190,8 @@ python3 -m http.server 8792                                 # → http://localho
 ```
 
 The UI files are ES modules, so `node --check` does not apply to them. The smoke scripts import and run them, which serves as the parse-and-run check.
+
+The two `test_hostinfo.py` skips are platform gates: the `/proc` backend runs on Linux and the Win32 ctypes backend runs only on Windows. On a Linux box the Windows path is read, not executed, so its numbers stay unverified until you run the suite on Windows.
 
 ## Origin
 

@@ -471,9 +471,9 @@ function applyMotion() {
 }
 
 /* --- view (Basic / Advanced, persisted under speculum.ui.view) -------------- */
-/* Basic is the everyday four: KPI, throughput, GPU & host, engines. Advanced
-   shows all nine sections. The class on #deck drives layout.css; p.hidden
-   keeps the paint loop off the sections that are not shown. */
+/* Basic is the everyday five: KPI, throughput, GPU & host, model timeline,
+   engines. Advanced shows all twelve sections. The class on #deck drives
+   layout.css; p.hidden keeps the paint loop off the sections that are not shown. */
 const BASIC_PANELS = new Set(['p-kpi', 'p-throughput', 'p-gpu', 'p-timeline', 'p-engines']);
 function panelVisible(p) { return ui.view === 'advanced' || BASIC_PANELS.has(p.id); }
 function applyView() {
