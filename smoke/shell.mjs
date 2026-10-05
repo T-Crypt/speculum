@@ -165,11 +165,13 @@ const ok = (cond, name) => { console.log((cond ? 'PASS ' : 'FAIL ') + name); if 
 
 /* --- DOM-walk helpers --------------------------------------------------------- */
 const kids = n => (n ? n.children : []);
-const byClass = (n, cls) => kids(n).filter(c => c && c.nodeType === 1 && c.className === cls);
+const byClass = (n, cls) => kids(n).filter(c => c && c.nodeType === 1 && c._cls.has(cls));
+/* class-membership match (like CSS .cls): elements may carry a base class plus
+   state classes (e.g. "engine-card is-muted"), so exact string compare misses them */
 const allClass = (n, cls, out = []) => {
   for (const c of kids(n)) {
     if (!c || c.nodeType !== 1) continue;
-    if (c.className === cls) out.push(c);
+    if (c._cls.has(cls)) out.push(c);
     allClass(c, cls, out);
   }
   return out;

@@ -1,4 +1,4 @@
-# Speculum collector — systemd --user unit (aphotic)
+# Speculum collector — systemd --user unit
 #
 #   install:  cp collector/speculum.service ~/.config/systemd/user/
 #             systemctl --user daemon-reload

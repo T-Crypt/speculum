@@ -1,133 +1,196 @@
-# Speculum — mirror-glass LLM runtime monitor
+# Speculum
 
-Single small project. HTML + CSS + JS, everything on screen is rendered from
-`app.js`; `index.html` carries only the panel shells. Since 2026-10-03 the
-dashboard is **live**: a small stdlib-only collector
-(`collector/speculum.py`) polls the local runtime and serves the panels plus
-`/api/snapshot` (JSON) and `/api/stream` (SSE, 1 Hz).
+A lightweight observability dashboard for a local LLM runtime.
 
-## Run
+Speculum runs on the box doing the work. It watches a local LLM stack — one
+GPU serving local models through llama-swap, plus engine backends such as
+NInfer or Strata (or Ollama, vLLM, LM Studio, Unsloth Studio, any
+OpenAI-compatible or custom endpoint) — and renders everything on one page,
+refreshed at 1 Hz:
 
-**Live (default).** The collector serves the static files and the feed:
+![Speculum — KPI strip, throughput, context residency, GPU and host](assets/overview.jpg)
 
+- **No build step, no dependencies.** The front end is plain HTML, CSS and ES
+  modules; the collector is one Python 3 process using only the standard
+  library. Nothing to `pip install`, nothing to compile.
+- **No infrastructure.** The only storage is an optional local SQLite file.
+- **Local by design.** Binds `127.0.0.1` only. Off-box viewing goes through
+  `tailscale serve` (tailnet-only) — never to the LAN or the public internet.
+- **Honest degradation.** Every source is optional. A down engine or backend
+  shows as an honest "no data" — never a fabricated number, and never enough
+  to take the page down.
+
+## Quick start
+
+All you need is Python 3.9 or newer (3.11+ only if you use a TOML config
+file) — the collector is stdlib-only, so there is nothing to install.
+
+**Live** — the collector serves the static files and the feed:
+
+```sh
+python3 collector/speculum.py            # → http://127.0.0.1:8792/
 ```
-python3 collector/speculum.py            # http://127.0.0.1:8792/
-```
 
-or as a systemd `--user` service (recommended for 24/7):
+For 24/7, run it as a systemd `--user` service:
 
-```
+```sh
 cp collector/speculum.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now speculum
 journalctl --user -u speculum -f
 ```
 
-The unit binds `127.0.0.1:8792` only, runs with `CUDA_VISIBLE_DEVICES=`
-(hidden from the GPU — it only reads `nvidia-smi` as a subprocess) and a
-`MemoryMax=64M` ceiling. To see it off-box, publish tailnet-only with
-`tailscale serve`; never to LAN or public.
+The unit binds `127.0.0.1:8792` only, runs with `CUDA_VISIBLE_DEVICES=` (the
+collector never touches the CUDA context — it reads `nvidia-smi` as one
+long-lived subprocess) and a `MemoryMax=64M` ceiling. To view it off-box,
+publish tailnet-only with `tailscale serve`.
 
-**Demo (simulator).** `?demo` runs the seeded simulation with no backend:
-serve the directory any way you like (e.g. `python3 -m http.server 8792`) and
-open `http://localhost:8792/?demo`.
+The unit assumes the checkout is at `~/speculum` — if yours lives elsewhere,
+point `ExecStart` at it.
 
-Keys: `P` pause, `R` reseed (demo) / resync (live), lanes glow when focused.
+**Configuration** is optional: copy `speculum.example.toml` to
+`speculum.toml` (repo root or `~/.config/speculum/`) and edit. With no config
+file, Speculum probes the default ports on localhost and shows what it finds.
+The config sets the bind address/port, enables or disables discovery, sets the
+history retention (30/60/90 days, or 0 to turn history off), and adds engine
+adapters (`ollama`, `vllm`, `lmstudio`, `unsloth`, `openai`, `custom`) on any
+host.
 
-## Sources (all optional — panels degrade to an honest "no data")
+**Demo** — `?demo` runs a seeded simulation with no backend at all; serve the
+directory any way you like (e.g. `python3 -m http.server 8792`) and open
+`http://localhost:8792/?demo`. The simulator fills exactly the same state
+shape as live data, so the page is identical in behaviour.
 
-| Source | What it feeds |
+## How it works
+
+```
+nvidia-smi · /proc · llama-swap :9090 · NInfer backend · Strata :8080 · other engines
+        │  (each optional; every poll degrades to "no data")
+        ▼
+collector/speculum.py   one Python 3 process, daemon poll threads,
+                        one shared state under one lock
+        │
+        ├─ static files from the repo root
+        ├─ GET /api/snapshot   one-shot full JSON
+        └─ GET /api/stream     SSE: 1 Hz tick (hot values + new events/requests)
+        ▼
+app.js   EventSource with snapshot-poll fallback; paint loop; all panels
+```
+
+The collector keeps bounded in-memory buffers (60 min of GPU/host/KPI samples
+at 1 Hz, the last 500 requests, the last 200 events), and `collector/history.py`
+persists the long view into SQLite: per-request rows, minute/hour rollups,
+model load spans and events, with daily pruning at the configured retention.
+Long-range views (throughput, timeline, leaderboard beyond 1 h) are answered
+from that database, so the page works across collector restarts.
+
+## Screenshots
+
+Captured live on the monitor box (dark theme; the settings menu also has a
+light theme).
+
+![Token ledger and the storage panel, with GPU and host readouts](assets/ledger-storage.jpg)
+
+![Model timeline and request history](assets/timeline-requests.jpg)
+
+![The whole deck zoomed out: leaderboard, engines, events, KV pool](assets/full-deck.jpg)
+
+![The advanced view with every panel in play](assets/advanced-view.jpg)
+
+![Request history: each inference with its cached/fresh split, TTFT and decode rate](assets/request-history.jpg)
+
+![Engine cards, the event stream and the KV pool](assets/engines-events.jpg)
+
+## What it watches
+
+| Source | Feeds |
 |---|---|
-| `nvidia-smi` (one long-lived `-lms 1000` subprocess, read line by line) | header node/driver, hardware gauges, VRAM KPI |
-| `/proc/stat` `/proc/meminfo` `/proc/loadavg` `/proc/uptime`, `VmRSS` of `llama-server` / `ninfer-serve` / `strata` | host readout (incl. Strata's system-RAM footprint) |
-| llama-swap `:9090` — `/running`, `/v1/models`, `/api/metrics/activity`, `/api/events` | model lanes, per-request records (cached vs fresh prompt, outputs), event stream |
-| NInfer backend (port from `/running` `proxy`, e.g. `:5803`) — `/metrics`, `/slots`, plus `GET /logs/stream/<model>` on llama-swap | decode/prefill tok-s, KV slots, per-request TTFT/queue/prefill/decode/MTP, engine-latch red alert on a run of "service unavailable" |
-| Strata `:8080` — `/v1/models`, `/metrics`, `/slots` (when started by hand) | second model lane + context rings |
-
-Bounded buffers: 60 min @ 1 s for GPU/host, last 500 inference requests,
-last 200 events.
-
-## Layout
-
-- `glass.css` — the material only: AETHER // NODE house palette, mirror glass,
-  glow, motion, a11y (no external font fetches).
-- `dashboard.css` — layout only, layered after `glass`.
-- `app.js` — the live feed (EventSource, snapshot poll fallback), the paint
-  loop, the pointer light; the seeded simulator lives behind `?demo`.
-- `collector/speculum.py` — stdlib-only collector (Python 3, one process).
-- `collector/speculum.service` — systemd `--user` unit.
+| `nvidia-smi` (one long-lived `-lms 1000` subprocess, read line by line) | GPU name/driver, temperature, utilisation, power, VRAM |
+| `/proc/stat` `/proc/meminfo` `/proc/loadavg` `/proc/uptime` | host CPU, RAM, load, uptime, top processes |
+| llama-swap `:9090` (`/running`, `/v1/models`, `/api/metrics/activity`, `/api/events`) | models in use, per-request records (cached vs fresh prompt, outputs, TTFT), event stream |
+| NInfer backend (port from llama-swap `/running`, e.g. `:5803`) — `/metrics`, `/slots`, log stream | decode/prefill tok/s, KV slots, per-request TTFT/queue/prefill/decode/MTP, engine latch alerts |
+| Strata `:8080` (`/v1/models`, `/metrics`, `/slots`) | second engine + context slots |
+| any engine from `speculum.toml` | same, via the pluggable adapters |
 
 ## Panels
 
-- **Bar** — real node (GPU name), driver, active model, host uptime, feed
-  state (sse/poll/demo/offline), status orb (rose on alerts or heat).
-- **Alert strip** — red bar for active alerts (e.g. the NInfer engine latch:
-  a run of "service unavailable" from the backend).
-- **KPI strip** — decode tok/s, requests/min, p95 total, first token (TTFT),
-  per token (TPOT), VRAM, cache hit, re-ingest tax, MTP acceptance, queue
-  depth. Each card carries its own sparkline (1 Hz history from the
-  collector) and its own glow colour.
-- **Signal** — rolling throughput, one trace per engine (NInfer / llama.cpp /
-  Strata / sim), autoscaled so the panel fills; focus fill on click.
-- **Hardware gauges** — arc gauges for GPU temp, util, draw, VRAM (warn
-  thresholds from the real `power.limit` / VRAM total), plus SM/mem clock,
-  fan, PCIe, power limit, and a host readout: CPU %, RAM, load, and the RSS
-  of the engine processes (Strata eats system RAM — it is shown).
-- **Context map** — one ring per live KV slot (NInfer `/slots`, Strata
-  `/slots`): arc length is prompt tokens vs the model window (262,144
-  NInfer / 131,072 Strata), a write head at the arc end, total context used
-  in the centre, session count in the panel hint.
-- **Token ledger** — generated / fresh prefill / cached-reused token volume
-  over 1 h, 24 h and since engine start (engine counters), with proportional
-  bars, plus reqs buffered, avg tok/req, sessions, re-ingest tax, MTP,
-  power limit.
-- **Context graph** — the newest inference requests as stacked bars against
-  their model window: cached (prefix hit) / fresh prefill (the re-ingest
-  tax) / generated, with per-request TTFT detail on hover, and the 15-min
-  re-ingest tax, MTP acceptance and cache-hit KPIs.
-- **Model lanes** — one per engine: origin, window, backend, decode tok/s,
-  queue, MTP; dimmed and marked when stopped (e.g. Strata when not running).
-- **Stream** — live runtime events: request completions, engine lifecycle,
-  WARN/ERROR lines, latch alerts.
-- **Pool** — one cell per live KV slot, fill = prompt tokens vs window.
+The top bar shows the overall state (Live / Degraded / Offline), GPU, driver,
+host uptime, feed type, the view toggle and the settings menu; an alert strip
+appears only while an alert is active (e.g. an engine latched red after a run
+of "service unavailable"). The deck then holds twelve panels:
 
-## Material contract
+| Panel | Shows |
+|---|---|
+| **KPI** | ten live KPIs in four groups — Throughput (decode rate, requests/min), Latency (first token, time/token, p95), Cache (cache hit, re-ingest tax, MTP acceptance), Capacity (VRAM, queue depth) — each with a 60-min sparkline and a delta vs 15 min ago |
+| **Throughput** | rolling decode tok/s, one trace per engine, ranges 15 min → 30 d (beyond 1 h from the history DB) |
+| **GPU & host** | horizontal meters for temp, utilisation, power draw and VRAM (warn/crit ticks from the real power limit and VRAM total), plus device readouts (SM/mem clock, fan, PCIe) and host (CPU, RAM, load, top processes) |
+| **Context** | one bar per live session: prompt tokens vs the model window, with 75 % / 90 % ticks |
+| **Model timeline** | which model was loaded on which engine over time (6 h → 30 d; spans survive collector restarts) |
+| **Token ledger** | generated / fresh / cached token volume over the last hour, last 24 h and since engine start, with per-column mix bars |
+| **Storage** | history database size, retention, what longer retention would cost; CSV export and prune-now |
+| **Requests** | recent inferences: model, prompt vs window (cached vs fresh), window, TTFT, decode rate |
+| **Leaderboard** | per-model requests, output tokens, median decode, cache hit, MTP and tokens per Wh (6 h → 30 d) |
+| **Engines** | one card per engine: state, origin, window, backend, decode rate, queue, MTP, history sparkline; dimmed with a reason when stopped |
+| **Events** | runtime event stream (request completions, engine lifecycle, warnings, alerts) with severity filters and pause-autoscroll |
+| **KV pool** | one cell per live KV slot, fill = prompt tokens vs window |
 
-- Registered `@property` for `--edge`, `--glow`, `--sheen`, `--lit` (always
-  `syntax:`, never `format:`).
-- Three layers per panel: pointer specular (`::before`), rotating conic mirror
-  rim (`::after`, masked to the border ring), sheen sweep (child element).
-- Glow is per panel via `--glow-c` and scales with `--glow` through
-  `color-mix(in oklab, ...)`. Relative colour syntax `oklch(from var(--x) ...)`
-  does not resolve with a `var()` source in Chromium, so it is not used.
-- Mirror floor: the deck reflects into the bottom of the frame via `body::after`.
-- `prefers-reduced-motion` kills all animation and drops the blur.
+**Views.** The top bar toggles **Basic** (KPI, throughput, GPU, timeline,
+engines) and **Advanced** (everything); the choice is bookmarkable via
+`?view=basic|advanced`. **Settings** (top-bar menu) persist in the browser:
+theme (dark default / light), reduce motion (follows the OS preference, or
+forced on/off), and the optional ripple effect (off by default).
 
-## Verified
+Keys: `P` pause · `R` reseed (demo) / resync (live).
 
-- `node --check app.js` — clean.
-- Headless Chromium over http: no console or page errors, 83 running animations,
-  `rim` and `sweep` active, mask-composite `exclude` applied, backdrop-filter
-  resolving, every canvas has drawn ink, zero panel overlap, reduced-motion
-  pass reports 0 animations.
-- Seeded RNG (`mulberry32`) — same seed, same dashboard. It must use
-  `Math.imul`; a plain multiply overflows past 2^53 and the low bits the `>>>`
-  needs are gone, which collapses the generator to a constant.
-- Screenshot: `render.png` at 1440x1020.
+## HTTP API
 
-## Not verified
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/snapshot` | one-shot full JSON (state + history) |
+| `GET /api/stream` | SSE: 1 Hz `tick` plus push events |
+| `GET /api/history?range=…` | rollup rows (minute/hour) |
+| `GET /api/requests?range=…` | raw request rows |
+| `GET /api/spans?range=…` | model load spans |
+| `GET /api/leaderboard?range=…` | per-model statistics |
+| `GET /api/storage` | database size, retention, projections |
+| `GET /api/export?range=…&format=csv` | CSV export |
+| `POST /api/prune` | apply retention now |
 
-- **Browser render of the live feed.** 2026-10-03: the collector's JSON was
-  verified end-to-end (snapshot, SSE tick, request/log parsing) and `app.js`
-  was exercised over the real payloads with a Node DOM stub (all panels
-  render, no exceptions), but headless Chromium/Firefox is not available on
-  this box, so the live view has not been screenshot-verified. Open
-  `http://127.0.0.1:8792/` in a browser to eyeball it.
-- The simulator (`?demo`) still uses invented numbers — that is its job.
+## Files
+
+| File | Role |
+|---|---|
+| `index.html` | page shell: top bar, twelve panel shells, footer, one module script |
+| `tokens.css` · `components.css` · `layout.css` | design tokens (dark + light themes, WCAG AA) · UI primitives · layout — no framework, no build |
+| `app.js` | feed (SSE + poll fallback), `?demo` simulator, paint loop, all panels |
+| `ui.js` · `viewmodel.js` · `ripple.js` | DOM primitives and formatters · pure view-model adapters · optional ripple effect |
+| `collector/speculum.py` | stdlib-only collector and HTTP server (Python 3, one process) |
+| `collector/history.py` | SQLite history: writer thread, rollups, spans, storage/export API |
+| `collector/engines.py` · `collector/config.py` | engine adapters + backoff scheduler · `speculum.toml` loader |
+| `collector/speculum.service` | systemd `--user` unit |
+| `speculum.example.toml` | example configuration |
+| `smoke/` | Node DOM-stub smoke tests (no browser needed) |
+| `LICENSE` | MIT license |
+
+## Development
+
+```sh
+python3 -m py_compile collector/speculum.py    # collector parses
+node smoke/ui-primitives.mjs                   # primitives + ripple state machine
+node smoke/shell.mjs                           # boots the real app.js shell over real payload shapes
+python3 -m http.server 8792                    # → http://localhost:8792/?demo (simulator)
+```
+
+The UI files are ES modules, so `node --check` does not apply to them; the
+smoke scripts import and execute them, which is the parse-and-run check.
+Demo values are deliberately invented — that is the simulator's job.
 
 ## Origin
 
-Built in a single agent turn on 2026-10-03 by a local model: Strata serving ISTA-DASLab's Qwen3.8-Flash-Next
-GSQ-RCO IQ2_XS on one RTX 4090, driven by the Pi coding agent, from a one-line prompt asking for a glass,
-enthusiast-style dashboard for a locally hosted LLM. About 5-10 minutes, 61.9K of a 131K context.
-Everything on screen is simulated today; wiring it to live llama-swap / NInfer / Strata / nvidia-smi data is next.
+Speculum started on 2026-10-03 as a prototype generated in a single agent
+turn on a local model — one RTX 4090 box serving local models through
+llama-swap and NInfer — and has been iterated on that same box since.
+
+## License
+
+MIT — see `LICENSE`.

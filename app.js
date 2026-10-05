@@ -158,7 +158,7 @@ function fetchSnap() {
   return r.then(x => { if (!x.ok) throw new Error('http ' + x.status); return x.json(); });
 }
 
-/* history rollups for the Throughput DB ranges (DESIGN.md §2): rows are
+/* history rollups for the Throughput DB ranges: rows are
    per-minute for 6h/24h and per-hour for 7d/30d, oldest first */
 function fetchHistory(range) {
   const r = fetch('api/history?range=' + range, { cache: 'no-store' });
@@ -1365,7 +1365,7 @@ function buildEngines() {
       c.sub.textContent = [
         e.origin || '—',
         e.window ? `${fmtTok(e.window)} ctx` : null,
-        /* DESIGN section 3 feature 4: holding VRAM with no request for idle_vram_min (collector) */
+        /* holding VRAM with no request for idle_vram_min (collector) */
         e.idle_vram ? `idle ${Math.round(e.idle_vram.idle_s / 60)} min · ${(e.idle_vram.mib / 1024).toFixed(1)} GB VRAM` : null,
         e.reason || e.backend || (e.up === true ? 'local' : 'no backend'),
       ].filter(Boolean).join(' · ');

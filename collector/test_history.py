@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for collector/history.py (DESIGN.md section 2, phase 2).
+"""Unit tests for collector/history.py.
 
 No network: the History writer is driven directly with H._cycle() against
 an injected clock, and readers use the module's own query methods or a
@@ -512,7 +512,7 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(st["rows"]["requests"], 1)
         # oldest data is the minute-floor rollup row of the sample
         self.assertEqual(st["first_t"], int(t0 // 60.0) * 60)
-        # under one hour of rollup coverage: raw DESIGN.md estimate
+        # under one hour of rollup coverage: raw sizing estimate
         self.assertEqual(st["basis"], "estimate")
         est = (history._EST_REQS_PER_DAY * history._EST_REQ_B
                + history._EST_MINUTES_UP * history._EST_ROLLUP_B)

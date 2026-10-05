@@ -1,3 +1,9 @@
 swappy-*.png
 __pycache__/
 *.pyc
+.pytest_cache/
+
+# local config and history database never belong in the repo
+speculum.toml
+*.db
+*.db-*

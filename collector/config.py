@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Speculum config loading (DESIGN.md section 1, speculum.toml).
+"""Speculum config loading (speculum.toml).
 
 The file is optional: with none found, discovery is on and everything
 else is default. Search order:
@@ -8,19 +8,19 @@ else is default. Search order:
     2. <repo root>/speculum.toml          (next to collector/)
     3. ~/.config/speculum/speculum.toml   (Windows: %APPDATA%\\Speculum\\)
 
-Only stdlib (tomllib on 3.11+).
+Only stdlib. `tomllib` (Python 3.11+) is imported only when a config file is
+actually read, so a configless run works on Python 3.9+.
 """
 
 import os
 import sys
-import tomllib
 from pathlib import Path
 
 DEFAULTS = {
     "server": {"host": "127.0.0.1", "port": 8792},
     "discovery": {"enabled": True},
     "history": {"retention_days": 30},   # 30, 60, 90 or 0 to turn off
-    # Threshold alerts (DESIGN.md section 3), each held for hold_s before it fires. vram_pct is high on
+    # Threshold alerts, each held for hold_s before it fires. vram_pct is high on
     # purpose: engines fill the card by design; the useful VRAM alert is a foreign process holding it.
     "alerts": {"vram_pct": 99, "gpu_temp_c": 83, "queue": 8, "hold_s": 30, "foreign_vram_mib": 512,
                "idle_vram_min": 30,     # an engine holding VRAM with no request this long is flagged on its card
@@ -82,6 +82,7 @@ def load(path=None):
     }
     if used is None:
         return cfg, None
+    import tomllib        # 3.11+; only needed when a config file is read
     raw = tomllib.loads(used.read_text(encoding="utf-8"))
     _merge(cfg["server"], raw.get("server"))
     _merge(cfg["discovery"], raw.get("discovery"))

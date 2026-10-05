@@ -976,7 +976,7 @@ def threshold_alerts(cfg, gpu, engines_, procs):
     return out
 
 
-# GPU process name -> engine key, for the idle-VRAM flag (DESIGN.md section 3 feature 4)
+# GPU process name -> engine key, for the idle-VRAM flag
 PROC_ENGINE = (("llama-server", "llama"), ("ninfer-serve", "ninfer"), ("strata", "strata"), ("ollama", "ollama"))
 
 
@@ -1285,7 +1285,7 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._static(path)
 
-    # -- history APIs (DESIGN.md §2) ------------------------------------------
+    # -- history APIs ------------------------------------------------------------
 
     def _history(self, query):
         q = urllib.parse.parse_qs(query)
@@ -1537,7 +1537,7 @@ def main():
         PORT = int(cfg["server"]["port"])
     host = cfg.get("server", {}).get("host") or HOST
 
-    # Phase 2: history (DESIGN.md §2). retention_days 0 -> no-op object.
+    # SQLite history. retention_days 0 -> no-op object.
     retention = int((cfg.get("history") or {}).get("retention_days", 30) or 0)
     if retention > 0:
         HIST = history.History(retention_days=retention,
@@ -1558,7 +1558,7 @@ def main():
     threading.Thread(target=ninfer_backend_poll, daemon=True).start()
     ALERTS.update(cfg.get("alerts") or spec_config.DEFAULTS["alerts"])
     threading.Thread(target=alerts_thread, daemon=True).start()
-    # Phase 1: adapter scheduler beside the legacy threads (DESIGN.md §1).
+    # Adapter scheduler beside the legacy threads.
     start_scheduler(cfg)
 
     srv = ThreadingHTTPServer((host, PORT), Handler)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for collector/engines.py (DESIGN.md phase 1).
+"""Unit tests for collector/engines.py.
 
 A stub http.server on 127.0.0.1 serves canned Ollama (/api/version,
 /api/ps), llama.cpp (/props, /metrics, /slots) and small custom-engine

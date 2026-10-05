@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Engine adapters and scheduler for Speculum (DESIGN.md section 1).
+"""Engine adapters and scheduler for Speculum.
 
 Stdlib only. An Adapter knows how to fingerprint its engine (by response,
 never by port) and poll() the common schema:
@@ -9,7 +9,7 @@ never by port) and poll() the common schema:
 
 Missing optional blocks are simply absent; caps lists which are present.
 The Scheduler is the ONE thread that polls every engine in turn, applying
-the DESIGN.md cadence: up and busy 1 s, up and idle 5 s, down backs off
+the scheduler cadence: up and busy 1 s, up and idle 5 s, down backs off
 5, 15, 60, 300 s; discovery probes the default localhost ports once at
 start and every 60 s, by fingerprint.
 """
@@ -22,7 +22,7 @@ import urllib.error
 import urllib.request
 
 LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
-TIMEOUT_LOCAL = 0.3       # DESIGN: connect timeout on localhost
+TIMEOUT_LOCAL = 0.3       # connect timeout on localhost
 TIMEOUT_REMOTE = 2.0
 DISCOVERY_EVERY = 60.0
 DOWN_BACKOFF = (5, 15, 60, 300)

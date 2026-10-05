@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Speculum history — SQLite persistence (DESIGN.md section 2, phase 2).
+"""Speculum history — SQLite persistence.
 
 Stdlib only. One daemon writer thread commits every 10 s in a single
 transaction; producer threads (pollers, KPI pass) only append to small
@@ -72,19 +72,19 @@ import time
 from pathlib import Path
 
 SCHEMA_VERSION = 3   # v3: unique (minute|hour, engine) rollup keys + upserts
-COMMIT_S = 10.0            # writer commits every 10 s (DESIGN.md §2)
+COMMIT_S = 10.0            # writer commits every 10 s
 MERGE_HOLD_S = 130.0       # 120 s speculum merge window + margin
 HOUR_AGG_DELAY_S = 300.0   # an hour's last request lands 3600+130 s in;
                            # aggregate it only this long after the hour closes
 EXPORT_CAP = 50_000        # export row cap; truncation is reported, not silent
 ENQUEUE_CAP = 5000         # bounded enqueue lists; drop oldest, count drops
 EVENTS_CAP = 50_000        # events table cap, enforced during prune
-HOUR_RETENTION_D = 400     # rollup_1h kept 400 days (DESIGN.md §2)
+HOUR_RETENTION_D = 400     # rollup_1h kept 400 days
 PRUNE_S = 86_400.0         # then prune once a day
 PRUNE_DELAY_S = 60.0       # and once ~60 s after start
-_EST_REQ_B = 250           # first-estimate bytes per request row (DESIGN.md)
+_EST_REQ_B = 250           # first-estimate bytes per request row
 _EST_ROLLUP_B = 100        # and per rollup row, until a day is measured
-_EST_REQS_PER_DAY = 500    # DESIGN.md §2 sizing example
+_EST_REQS_PER_DAY = 500    # sizing example
 _EST_MINUTES_UP = 3 * 1440  # three engines up all day
 
 _SCHEMA = """
@@ -887,10 +887,10 @@ class History:
         stretch into its past:
 
             span >= 1 day            -> measured (db bytes / span days)
-            1 h <= span < 1 day      -> DESIGN.md estimate with its request
+            1 h <= span < 1 day      -> sizing estimate with its request
                 component scaled by the measured requests/day from
                 rollup_1m sums          ("rate-scaled")
-            span < 1 h               -> raw DESIGN.md §2 first estimate
+            span < 1 h               -> raw first estimate
         `basis` says which one a projection was built on."""
         if not self._enabled:
             return {"enabled": False, "path": None, "bytes": 0,
