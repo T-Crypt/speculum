@@ -351,6 +351,643 @@ if __name__ == "__main__":
     unittest.main(verbosity=2)
 
 
+class _VllmStub(BaseHTTPRequestHandler):
+    """A vLLM OpenAI server. `with_metrics` False models a server started with
+    metrics disabled -- the case that used to read as "engine down" and raise a
+    false red alert on a perfectly healthy, serving engine."""
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        st = self.server.state
+        p = self.path.split("?")[0]
+        if p == "/version":
+            body = json.dumps({"version": "0.11.0"}).encode()
+            code = 200
+        elif p == "/v1/models":
+            body = json.dumps({"object": "list", "data": [
+                {"id": "Qwen/Qwen3-8B", "max_model_len": 32768}]}).encode()
+            code = 200
+        elif p == "/metrics" and st.get("with_metrics", True):
+            st["metrics_calls"] = st.get("metrics_calls", 0) + 1
+            n = st["metrics_calls"]
+            body = ("vllm:prompt_tokens_total 1000\n"
+                    "vllm:generation_tokens_total %d\n"
+                    "vllm:num_requests_running 1\n"
+                    "vllm:num_requests_waiting 2\n" % (500 + 100 * n)).encode()
+            code = 200
+        elif p == "/metrics":
+            body, code = b"404 page not found", 404
+        else:
+            body, code = b"not found", 404
+        self.send_response(code)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class VllmMetricsAreOptional(unittest.TestCase):
+    """vLLM must never be called down because /metrics is absent."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), _VllmStub)
+        cls.server.daemon_threads = True
+        cls.server.state = {"with_metrics": True}
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+        cls.url = "http://127.0.0.1:%d" % cls.server.server_address[1]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+
+    def test_fingerprint_matches_without_metrics(self):
+        self.server.state["with_metrics"] = False
+        self.assertTrue(engines.VllmAdapter.fingerprint(self.url))
+
+    def test_up_without_metrics_is_not_down(self):
+        self.server.state["with_metrics"] = False
+        rec = engines.VllmAdapter(url=self.url).poll()
+        self.assertTrue(rec["up"], "a vLLM with metrics off must read as up")
+        self.assertEqual(rec["state"], "running")
+        self.assertEqual([m["id"] for m in rec["models"]], ["Qwen/Qwen3-8B"])
+        self.assertEqual(rec["window"], 32768)
+        self.assertNotIn("counters", rec)       # absent, not fabricated zero
+
+    def test_counters_and_queue_when_metrics_served(self):
+        self.server.state.update({"with_metrics": True, "metrics_calls": 0})
+        rec = engines.VllmAdapter(url=self.url).poll()
+        self.assertTrue(rec["up"])
+        self.assertEqual(rec["queue"], 2)
+        self.assertIn("output_tokens", rec["counters"])
+        self.assertEqual(rec["caps"],
+                         [k for k in engines.OPTIONAL_BLOCKS if k in rec])
+
+    def test_rates_from_counter_delta(self):
+        self.server.state.update({"with_metrics": True, "metrics_calls": 0})
+        a = engines.VllmAdapter(url=self.url)
+        a.poll()                                  # first poll: baseline only
+        # Rewind the stored baseline by 5 s so the next poll sees a real delta
+        # without sleeping. rates() needs >= 0.5 s of elapsed time.
+        counters, t = a._last
+        a._last = (dict(counters), t - 5.0)
+        rec = a.poll()
+        self.assertIn("rates", rec)
+        self.assertGreater(rec["rates"]["decode_tps"], 0)
+
+
+class _FreetokenStub(BaseHTTPRequestHandler):
+    """FreeToken 1919: /health plus the JSON /v1/stats (docs/cli.md:143-144).
+    No Prometheus anywhere -- that is the whole point of this adapter."""
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        st = self.server.state
+        p = self.path.split("?")[0]
+        if p == "/health":
+            body, code = json.dumps({"status": "ok", "model": "GLM-5.2"}).encode(), 200
+        elif p == "/v1/stats":
+            st["stats_calls"] += 1
+            n = st["stats_calls"]
+            body = json.dumps({
+                "tokens_generated": 1000 + 50 * n,
+                "tokens_prompt": 400 + 10 * n,
+                "tokens_cached": 120,
+                "queue": st.get("queue", 1),
+                "vram_used_gb": 21.5,
+                "tokens_per_second": 47.3,
+                "model": {"input_modalities": ["text"]},
+            }).encode()
+            code = 200
+        elif p == "/metrics":
+            body, code = b"404 page not found", 404
+        else:
+            body, code = b"not found", 404
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class FreeTokenJsonStats(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), _FreetokenStub)
+        cls.server.daemon_threads = True
+        cls.server.state = {"stats_calls": 0, "queue": 1}
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+        cls.url = "http://127.0.0.1:%d" % cls.server.server_address[1]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+
+    def test_fingerprint_uses_stats_shape(self):
+        self.assertTrue(engines.FreeTokenAdapter.fingerprint(self.url))
+
+    def test_fingerprint_rejects_closed_port(self):
+        self.assertFalse(engines.FreeTokenAdapter.fingerprint("http://127.0.0.1:1"))
+
+    def test_poll_reads_counters_queue_and_extras(self):
+        self.server.state.update({"stats_calls": 0, "queue": 3})
+        rec = engines.FreeTokenAdapter(url=self.url).poll()
+        self.assertTrue(rec["up"])
+        self.assertEqual(rec["queue"], 3)
+        self.assertEqual(rec["state"], "running")
+        self.assertEqual(rec["counters"]["cached_tokens"], 120.0)
+        self.assertEqual(rec["extras"]["vram_gb"], 21.5)
+        self.assertEqual(rec["extras"]["server_tps"], 47.3)
+
+    def test_idle_when_queue_empty(self):
+        self.server.state.update({"stats_calls": 0, "queue": 0})
+        rec = engines.FreeTokenAdapter(url=self.url).poll()
+        self.assertEqual(rec["state"], "idle")
+
+    def test_missing_fields_absent_not_zero(self):
+        self.server.state["stats_calls"] = 0
+        rec = engines.FreeTokenAdapter(url=self.url).poll()
+        self.assertIn("cached_tokens", rec["counters"])
+
+
+class _SglangStub(BaseHTTPRequestHandler):
+    """SGLang 30000 with enable_metrics OFF by default
+    (arg_groups/fields/observability.py:70)."""
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        st = self.server.state
+        p = self.path.split("?")[0]
+        if p == "/v1/models":
+            body = json.dumps({"object": "list", "data": [
+                {"id": "meta-llama/Llama-3.1-8B", "max_model_len": 8192}]}).encode()
+            code = 200
+        elif p == "/get_model_info":
+            body = json.dumps({"model_path": "meta-llama/Llama-3.1-8B",
+                               "is_generating": bool(st.get("busy"))}).encode()
+            code = 200
+        elif p == "/health":
+            body, code = b"", 200
+        elif p == "/metrics" and st.get("with_metrics"):
+            body = ("sglang:prompt_tokens_total 900\n"
+                    "sglang:generation_tokens_total 400\n"
+                    "sglang:num_requests_waiting 0\n").encode()
+            code = 200
+        elif p == "/metrics":
+            body, code = b"404 page not found", 404
+        else:
+            body, code = b"not found", 404
+        self.send_response(code)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class SglangMetricsOffByDefault(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), _SglangStub)
+        cls.server.daemon_threads = True
+        cls.server.state = {"with_metrics": False, "busy": False}
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+        cls.url = "http://127.0.0.1:%d" % cls.server.server_address[1]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+
+    def test_default_ports(self):
+        self.assertEqual(engines.SglangAdapter.default_port, 30000)
+        self.assertEqual(engines.FreeTokenAdapter.default_port, 1919)
+        self.assertEqual(engines.KoboldCppAdapter.default_port, 5001)
+        self.assertEqual(engines.TabbyApiAdapter.default_port, 5000)
+
+    def test_fingerprint_and_up_without_metrics(self):
+        self.assertTrue(engines.SglangAdapter.fingerprint(self.url))
+        self.server.state["with_metrics"] = False
+        rec = engines.SglangAdapter(url=self.url).poll()
+        self.assertTrue(rec["up"], "stock sglang has metrics off; must read as up")
+        self.assertEqual([m["ctx"] for m in rec["models"]], [8192])
+        self.assertNotIn("counters", rec)
+
+    def test_counters_when_metrics_enabled(self):
+        self.server.state["with_metrics"] = True
+        rec = engines.SglangAdapter(url=self.url).poll()
+        self.assertTrue(rec["up"])
+        self.assertEqual(rec["counters"]["output_tokens"], 400.0)
+
+
+class _KoboldCppStub(BaseHTTPRequestHandler):
+    """KoboldCpp 5001 (koboldcpp.py:130 defaultport = 5001). /slots answers 501
+    (koboldcpp.py:7114) so there are no KV sessions to report."""
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        p = self.path.split("?")[0]
+        if p == "/api/v1/model":
+            body, code = json.dumps({"result": "koboldcpp/Qwen2.5-7B-GGUF"}).encode(), 200
+        elif p == "/api/v1/config/max_length":
+            body, code = json.dumps({"value": 8192}).encode(), 200
+        elif p == "/v1/models":
+            body, code = json.dumps({"object": "list", "data": [
+                {"id": "koboldcpp/Qwen2.5-7B-GGUF", "owned_by": "koboldcpp"}]}).encode(), 200
+        elif p == "/slots":
+            body, code = json.dumps({"error": {"code": 501, "message":
+                "This server does not support slots endpoint."}}).encode(), 501
+        elif p == "/props":
+            # KoboldCpp serves a llama.cpp-shaped /props with total_slots added
+            body = json.dumps({"id": 0, "total_slots": 1,
+                               "model_path": "qwen.gguf", "n_ctx": 8192,
+                               "default_generation_settings": {"n_ctx": 8192}}).encode()
+            code = 200
+        elif p == "/version":
+            # KoboldCpp does NOT serve a bare /version, which is what keeps it
+            # from satisfying the vLLM fingerprint on a shared port.
+            body, code = b"not found", 404
+        else:
+            body, code = b"not found", 404
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class KoboldCppIsNotLlamaCpp(unittest.TestCase):
+    """KoboldCpp serves a llama.cpp-shaped /props, so llamacpp must decline it
+    (same treatment Strata already gets) or it polls for counters that never come."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), _KoboldCppStub)
+        cls.server.daemon_threads = True
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+        cls.url = "http://127.0.0.1:%d" % cls.server.server_address[1]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+
+    def test_llamacpp_fingerprint_declines(self):
+        self.assertFalse(engines.LlamaCppAdapter.fingerprint(self.url))
+
+    def test_koboldcpp_fingerprint_matches(self):
+        self.assertTrue(engines.KoboldCppAdapter.fingerprint(self.url))
+
+    def test_poll_reports_model_and_window(self):
+        rec = engines.KoboldCppAdapter(url=self.url).poll()
+        self.assertTrue(rec["up"])
+        self.assertEqual([m["id"] for m in rec["models"]],
+                         ["koboldcpp/Qwen2.5-7B-GGUF"])
+        self.assertEqual(rec["window"], 8192)
+        self.assertNotIn("sessions", rec)          # /slots is 501 here
+
+    def test_strata_still_excluded(self):
+        # the pre-existing Strata guard must survive the new total_slots check
+        self.assertFalse(engines._is_strata(self.url))
+
+
+class _LocalAIStub(BaseHTTPRequestHandler):
+    """LocalAI 8080: /healthz answers 204 No Content (core/http/routes/health.go)."""
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        p = self.path.split("?")[0]
+        if p == "/healthz":
+            self.send_response(204)                # no body, by design
+            self.end_headers()
+            return
+        if p == "/v1/models":
+            body = json.dumps({"object": "list", "data": [
+                {"id": "gpt4all-j", "context_length": 8192}]}).encode()
+            self.send_response(200)
+        elif p == "/metrics":
+            body = (b"localai_completion_tokens_total 1234\n"
+                    b"localai_prompt_tokens_total 567\n")
+            self.send_response(200)
+        else:
+            self.send_response(404)
+            body = b"not found"
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class LocalAISharesPortWithLlamaCpp(unittest.TestCase):
+    """LocalAI is OpenAI-compatible on 8080, so before its adapter it matched the
+    generic `openai` fingerprint and was labelled "OpenAI" with no counters."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), _LocalAIStub)
+        cls.server.daemon_threads = True
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+        cls.url = "http://127.0.0.1:%d" % cls.server.server_address[1]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+
+    def test_fingerprint_needs_204_empty(self):
+        self.assertTrue(engines.LocalAIAdapter.fingerprint(self.url))
+        # it also matches generic openai, which is why the DISCOVERY order matters
+        self.assertTrue(engines.OpenAIAdapter.fingerprint(self.url))
+
+    def test_discovery_order_prefers_localai_over_openai(self):
+        types = dict(engines.DISCOVERY)[8080]
+        self.assertLess(types.index("localai"), types.index("openai"))
+
+    def test_poll_reads_models_and_counters(self):
+        rec = engines.LocalAIAdapter(url=self.url).poll()
+        self.assertTrue(rec["up"])
+        self.assertEqual([m["id"] for m in rec["models"]], ["gpt4all-j"])
+        self.assertEqual(rec["counters"]["output_tokens"], 1234.0)
+
+
+class _TabbyStub(BaseHTTPRequestHandler):
+    """TabbyAPI 5000: /tabby/config is the ExLlamaV3 admin namespace."""
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        p = self.path.split("?")[0]
+        if p == "/tabby/config":
+            body = json.dumps({"context_length": 8192, "model": "qwen3-8b-exl2"}).encode()
+            code = 200
+        elif p == "/v1/models":
+            body = json.dumps({"object": "list", "data": [
+                {"id": "qwen3-8b-exl2"}]}).encode()
+            code = 200
+        else:
+            body, code = b"not found", 404
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class _PlainOpenAIServer(BaseHTTPRequestHandler):
+    """Any OpenAI-compatible server on 5000. TabbyAPI must NOT claim it."""
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        if self.path.split("?")[0] == "/v1/models":
+            body = json.dumps({"object": "list", "data": [{"id": "someone-elses"}]}).encode()
+            code = 200
+        else:
+            body, code = b"not found", 404
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class TabbyIsNotAnyOpenAIServer(unittest.TestCase):
+    """5000 is only claimed via /tabby/config. Falling back to /v1/models would
+    let any OpenAI-compatible server on 5000 be mislabelled TabbyAPI."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.srv = ThreadingHTTPServer(("127.0.0.1", 0), _TabbyStub)
+        cls.srv.daemon_threads = True
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+        cls.url = "http://127.0.0.1:%d" % cls.srv.server_address[1]
+
+        cls.plain = ThreadingHTTPServer(("127.0.0.1", 0), _PlainOpenAIServer)
+        cls.plain.daemon_threads = True
+        threading.Thread(target=cls.plain.serve_forever, daemon=True).start()
+        cls.plain_url = "http://127.0.0.1:%d" % cls.plain.server_address[1]
+
+    @classmethod
+    def tearDownClass(cls):
+        for s in (cls.srv, cls.plain):
+            s.shutdown()
+            s.server_close()
+
+    def test_matches_real_tabby(self):
+        self.assertTrue(engines.TabbyApiAdapter.fingerprint(self.url))
+        rec = engines.TabbyApiAdapter(url=self.url).poll()
+        self.assertTrue(rec["up"])
+        self.assertEqual([m["id"] for m in rec["models"]], ["qwen3-8b-exl2"])
+        self.assertEqual(rec["window"], 8192)
+
+    def test_declines_a_plain_openai_server(self):
+        # it does serve /v1/models, so this is the exact case a fallback would get wrong
+        self.assertTrue(engines.OpenAIAdapter.fingerprint(self.plain_url))
+        self.assertFalse(engines.TabbyApiAdapter.fingerprint(self.plain_url))
+
+
+class AdaptersDegradeOnDeadPort(unittest.TestCase):
+    """Invariant 3: every adapter must fingerprint False and poll to up=False on a
+    closed port, and return the full schema -- never raise, never claim to be up."""
+
+    DEAD = "http://127.0.0.1:1"
+
+    def test_no_adapter_matches_a_closed_port(self):
+        for name, cls in engines.ADAPTERS.items():
+            if name == "custom":
+                continue
+            try:
+                self.assertFalse(cls.fingerprint(self.DEAD), name)
+            except Exception as e:
+                self.fail("%s fingerprint raised %s" % (name, type(e).__name__))
+
+    def test_no_adapter_polls_up_on_a_closed_port(self):
+        for name, cls in engines.ADAPTERS.items():
+            if name == "custom":
+                continue
+            try:
+                rec = cls(url=self.DEAD).poll()
+            except Exception as e:
+                self.fail("%s poll raised %s: %s" % (name, type(e).__name__, e))
+            self.assertIs(rec.get("up"), False, name)
+            for k in ("key", "label", "type", "url", "state", "caps", "up"):
+                self.assertIn(k, rec, "%s missing %s" % (name, k))
+
+
+class DiscoveryTargetsAndClaims(unittest.TestCase):
+    """[discovery] targets adds remote hosts on the same port list, and claiming
+    is per host:port so a remote 8080 is discoverable while a local 8080 is taken."""
+
+    def test_localhost_targets(self):
+        t = engines.discovery_targets()
+        self.assertTrue(all(h == engines.LOCAL_HOST for h, _, _ in t))
+        self.assertEqual(len(t), len(engines.DISCOVERY))
+
+    def test_remote_host_appends_full_port_list(self):
+        t = engines.discovery_targets(["10.0.0.41"])
+        self.assertEqual(len(t), 2 * len(engines.DISCOVERY))
+        self.assertIn(("10.0.0.41", 30000, ("sglang",)), t)
+
+    def test_duplicates_and_local_aliases_dropped(self):
+        t = engines.discovery_targets(["10.0.0.41", "10.0.0.41",
+                                       "127.0.0.1", "localhost"])
+        self.assertEqual(len(t), 2 * len(engines.DISCOVERY))
+
+    def test_claims_are_host_and_port(self):
+        class Fake(engines.Adapter):
+            type = "fake"
+            default_port = None
+
+        s = engines.Scheduler(
+            [Fake(url="http://127.0.0.1:8080", key="a"),
+             Fake(url="http://10.0.0.41:8080", key="b")],
+            discovery_enabled=False, claimed_ports=lambda: {9090})
+        self.assertEqual(s._claimed(),
+                         {("127.0.0.1", 8080), ("10.0.0.41", 8080),
+                          ("127.0.0.1", 9090)})
+
+    def test_every_discovery_type_is_registered_and_labelled(self):
+        for port, types in engines.DISCOVERY:
+            for t in types:
+                self.assertIn(t, engines.ADAPTERS, "port %d" % port)
+                self.assertIn(t, engines.TYPE_LABELS, "port %d" % port)
+
+    def test_scheduler_passes_discovery_hosts(self):
+        s = engines.Scheduler([], discovery_enabled=False,
+                              discovery_hosts=["10.0.0.41"])
+        self.assertEqual(s.discovery_hosts, ["10.0.0.41"])
+
+
+class FingerprintMatrix(unittest.TestCase):
+    """Every real engine, against every adapter fingerprint.
+
+    Two distinct stubs per family matter: Ollama serves /api/version and NOT
+    /props, while llama.cpp serves /props and NOT /api/version. Handing both to
+    one hybrid stub makes each match the other and hides real regressions.
+
+    The generic `openai` adapter legitimately matches every OpenAI-compatible
+    server, so a cross-match by `openai` is expected. What must never happen is
+    a SPECIFIC adapter claiming the wrong engine -- that is what would
+    mislabel a card and poll endpoints that do not exist.
+    """
+
+    class _RealOllama(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            p = self.path.split("?")[0]
+            if p == "/api/version":
+                body, code = b'{"version": "0.34.3"}', 200
+            elif p == "/api/ps":
+                body, code = b'{"models": []}', 200
+            else:
+                body, code = b"not found", 404
+            self.send_response(code)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    class _RealLlamaCpp(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            p = self.path.split("?")[0]
+            if p == "/props":
+                body = b'{"default_generation_settings": {"n_ctx": 4096}, "build_info": "b1234"}'
+                code = 200
+            elif p == "/metrics":
+                body = (b"llamacpp:prompt_tokens_total 1000\n"
+                        b"llamacpp:prompt_seconds_total 10.0\n"
+                        b"llamacpp:tokens_predicted_total 500\n"
+                        b"llamacpp:tokens_predicted_seconds_total 5.0\n"
+                        b"llamacpp:requests_running 0\n"
+                        b"llamacpp:requests_waiting 0\n"
+                        b"llamacpp:requests_deferred 0\n")
+                code = 200
+            elif p == "/slots":
+                body = (b'[{"id":0,"state":"idle","n_ctx":4096,'
+                        b'"n_prompt_tokens":17,"n_prompt_tokens_cache":12}]')
+                code = 200
+            else:
+                body, code = b"not found", 404
+            self.send_response(code)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    def _serve(self, handler):
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        srv.daemon_threads = True
+        srv.state = {"metrics_calls": 0, "stats_calls": 0, "with_metrics": False,
+                     "ps_models": [], "llamacpp_running": 0, "auth": None,
+                     "queue": 1, "busy": False}
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        return srv, "http://127.0.0.1:%d" % srv.server_address[1]
+
+    def test_each_engine_is_claimed_only_by_its_own_specific_adapter(self):
+        cases = [
+            (self._RealOllama, "ollama"),
+            (self._RealLlamaCpp, "llamacpp"),
+            (_VllmStub, "vllm"),
+            (_SglangStub, "sglang"),
+            (_FreetokenStub, "freetoken"),
+            (_KoboldCppStub, "koboldcpp"),
+            (_TabbyStub, "tabbyapi"),
+            (_LocalAIStub, "localai"),
+            (_UnslothStub, "unsloth"),
+        ]
+        specific = [n for n in engines.ADAPTERS
+                    if n not in ("custom", "openai")]
+        srvs = []
+        try:
+            for handler, expect in cases:
+                srv, url = self._serve(handler)
+                srvs.append(srv)
+                hits = set()
+                for name in specific:
+                    try:
+                        if engines.ADAPTERS[name].fingerprint(url):
+                            hits.add(name)
+                    except Exception:
+                        pass
+                self.assertIn(expect, hits,
+                              "%s not recognised by its own adapter" % expect)
+                others = hits - {expect}
+                self.assertFalse(others, "%s also claimed by %s" % (expect, others))
+        finally:
+            for s in srvs:
+                s.shutdown()
+                s.server_close()
+
+    def test_generic_openai_never_precedes_a_specific_adapter(self):
+        # discovery() takes the FIRST match, so the generic adapter must always
+        # be last -- otherwise it would claim an engine a specific one knows.
+        for port, types in engines.DISCOVERY:
+            if "openai" not in types:
+                continue
+            specific_idx = [i for i, t in enumerate(types) if t != "openai"]
+            self.assertGreater(types.index("openai"), max(specific_idx),
+                               "port %d: openai must come last" % port)
+
+    def test_every_adapter_is_reachable(self):
+        reachable = {t for _p, ts in engines.DISCOVERY for t in ts}
+        reachable |= {"openai", "custom"}     # config-only / fallback
+        for name in engines.ADAPTERS:
+            self.assertIn(name, reachable, name)
+
+
 class _UnslothStub(BaseHTTPRequestHandler):
     """What a real `unsloth studio` answered (probed 2026-10-03): /api/health needs no key,
     /v1/models is 401 without one."""

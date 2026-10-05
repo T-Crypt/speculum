@@ -8,6 +8,11 @@ port = 8792
 
 [discovery]
 enabled = true              # probe the default ports on localhost
+# Extra hosts to probe on the same port list — for a collector running away
+# from the GPU box (a Proxmox LXC, say). Localhost is always probed and is
+# tried first, so a local engine always wins its own port. Claims are keyed on
+# host:port, so a remote 8080 stays discoverable while a local 8080 is taken.
+# targets = ["10.0.0.41", "gpu-box.lan"]
 
 [history]
 retention_days = 30         # 30, 60, 90 or 0 to turn history off

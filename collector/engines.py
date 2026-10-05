@@ -22,6 +22,7 @@ import urllib.error
 import urllib.request
 
 LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
+LOCAL_HOST = "127.0.0.1"
 TIMEOUT_LOCAL = 0.3       # connect timeout on localhost
 TIMEOUT_REMOTE = 2.0
 DISCOVERY_EVERY = 60.0
@@ -29,15 +30,39 @@ DOWN_BACKOFF = (5, 15, 60, 300)
 OPTIONAL_BLOCKS = ("models", "counters", "rates", "queue", "window",
                    "sessions", "extras")
 
-# port -> adapters to try there, in order (8080 is ambiguous: llama.cpp,
-# OpenAI-compatible servers and Strata all listen there)
+# port -> adapters to try there, in order. Several ports are ambiguous and the
+# order is what disambiguates them:
+#   8080  llama.cpp, LocalAI, then any OpenAI-compatible server; Strata also
+#         answers here but is excluded by name before this table is consulted
+#   8000  vLLM, then any OpenAI-compatible server (MLC-LLM's mlc_llm serve
+#         defaults here and has no health endpoint to fingerprint)
+# Ports are probed on 127.0.0.1 by default; [discovery] targets in speculum.toml
+# adds remote hosts on the same port list (see discovery_targets).
 DISCOVERY = [
     (11434, ("ollama",)),
-    (8080, ("llamacpp", "openai")),
-    (8000, ("vllm",)),
+    (8080, ("llamacpp", "localai", "openai")),
+    (8000, ("vllm", "openai")),
     (1234, ("lmstudio",)),
     (8888, ("unsloth",)),
+    (1919, ("freetoken",)),
+    (30000, ("sglang",)),
+    (5000, ("tabbyapi",)),
+    (5001, ("koboldcpp",)),
 ]
+
+
+def discovery_targets(extra_hosts=()):
+    """(host, port, adapter types) triples to probe: localhost on every port,
+    then each extra host on the same port list. Localhost comes first so a
+    local engine always wins its own port over a remote one."""
+    hosts = []
+    for h in extra_hosts or ():
+        h = str(h).strip()
+        if h and h not in hosts and h not in LOCAL_HOSTS:
+            hosts.append(h)
+    out = [(LOCAL_HOST, port, types) for port, types in DISCOVERY]
+    out.extend((h, port, types) for h in hosts for port, types in DISCOVERY)
+    return out
 
 
 def parse_prom(text):
@@ -272,6 +297,11 @@ class LlamaCppAdapter(Adapter):
         # poller, and as llama.cpp it reads as down (no llamacpp: counters) and raises a false alert.
         if isinstance(body, dict) and str(body.get("build_info", "")).startswith("Strata"):
             return False
+        # KoboldCpp likewise serves a llama.cpp-shaped /props, but adds total_slots
+        # (koboldcpp.py:7106) and answers /slots with 501. Left as llama.cpp it would
+        # poll for counters that never come and read as down.
+        if isinstance(body, dict) and "total_slots" in body:
+            return False
         return isinstance(body, dict) and "default_generation_settings" in body
 
     def poll(self):
@@ -313,6 +343,14 @@ class LlamaCppAdapter(Adapter):
 
 
 class VllmAdapter(Adapter):
+    """vLLM's OpenAI server (default 127.0.0.1:8000).
+
+    Liveness comes from /health + /v1/models, never from /metrics: vLLM can be
+    started with metrics disabled (--disable-metrics / --disable-observability),
+    and treating a missing /metrics as "engine down" latches a false red alert
+    on a server that is serving requests perfectly well. Counters, queue and
+    rates are therefore OPTIONAL and simply absent when /metrics is not served.
+    """
     type = "vllm"
     default_port = 8000
 
@@ -321,34 +359,391 @@ class VllmAdapter(Adapter):
 
     @classmethod
     def fingerprint(cls, url):
+        # /version is the positive marker: vLLM serves {"version": ...} there
+        # (vllm/entrypoints/serve/instrumentator/basic.py:53 `@router.get("/version")`).
+        # It must NOT fall back to the bare OpenAI model list, because SGLang,
+        # KoboldCpp and TabbyAPI all serve /v1/models and vLLM is tried first on
+        # 8000 -- a fallback here would let vLLM claim any of them.
         try:
             r = urllib.request.urlopen(
-                urllib.request.Request(url + "/metrics"),
+                urllib.request.Request(url + "/version"),
                 timeout=TIMEOUT_LOCAL if _is_local(url) else TIMEOUT_REMOTE)
-            return "vllm:" in r.read(1 << 20).decode("utf-8", "replace")
+            body = json.loads(r.read().decode("utf-8", "replace"))
         except Exception:
             return False
+        if not (isinstance(body, dict) and isinstance(body.get("version"), str)):
+            return False
+        # Require the OpenAI model list too, so a stray /version elsewhere
+        # (many tools answer one) cannot match on its own.
+        try:
+            r = urllib.request.urlopen(
+                urllib.request.Request(url + "/v1/models"),
+                timeout=TIMEOUT_LOCAL if _is_local(url) else TIMEOUT_REMOTE)
+            models = json.loads(r.read().decode("utf-8", "replace"))
+        except Exception:
+            return False
+        return isinstance(models, dict) and isinstance(models.get("data"), list)
 
     def poll(self):
         t = time.time()
         try:
-            counters = parse_prom(self.get_text("/metrics"))
+            models = self.get_json("/v1/models").get("data") or []
         except Exception:
             return self._finish({"up": False, "state": "error"})
-        if not any(k.startswith("vllm:") for k in counters):
+        out = []
+        for m in models:
+            if not isinstance(m, dict):
+                continue
+            out.append({"id": m.get("id"), "loaded": True,
+                        "size_bytes": None, "vram_bytes": None,
+                        "ctx": _i(m.get("max_model_len")
+                                  or m.get("context_length")),
+                        "expires": None})
+        rec = {"up": True, "state": "running" if out else "idle"}
+        if out:
+            rec["models"] = out
+            ctxs = [m["ctx"] for m in out if m.get("ctx")]
+            if ctxs:
+                rec["window"] = max(ctxs)
+        # Optional: Prometheus, when this server serves it at all.
+        counters = {}
+        try:
+            parsed = parse_prom(self.get_text("/metrics"))
+        except Exception:
+            parsed = {}
+        if any(k.startswith("vllm:") or k.startswith("vllm_") for k in parsed):
+            counters = {"prompt_tokens": parsed.get("vllm:prompt_tokens_total"),
+                        "output_tokens": parsed.get("vllm:generation_tokens_total")}
+            rec["queue"] = int(parsed.get("vllm:num_requests_waiting", 0) or 0)
+            rec["state"] = ("running" if parsed.get("vllm:num_requests_running", 0)
+                            else rec["state"])
+            r = self.rates(parsed, t, self.RATES)
+            if r:
+                rec["rates"] = r
+        if counters:
+            rec["counters"] = counters
+        return self._finish(rec, counters=parsed or None)
+
+
+class FreeTokenAdapter(Adapter):
+    """FreeToken (FlashML-org/FreeToken), an edge-native MoE serving engine;
+    default 127.0.0.1:1919 (docs/cli.md:43 "| `--port` | 1919 | Bind port |").
+
+    It serves NO Prometheus: the stats endpoint is JSON. GET /v1/stats reports
+    throughput, latency, VRAM and pool occupancy (docs/cli.md:144), which is a
+    near one-to-one fit for Speculum's counters/rates/sessions schema, so this
+    adapter reads that instead of a /metrics text scrape.
+
+    Field names are read defensively: /v1/stats has grown over releases, so each
+    value is looked up under a couple of plausible keys and dropped when absent
+    rather than reported as zero.
+    """
+    type = "freetoken"
+    default_port = 1919
+
+    @classmethod
+    def fingerprint(cls, url):
+        # /health needs no key and names the server; /v1/stats is the
+        # distinctive one (no other engine here serves a JSON stats body).
+        try:
+            r = urllib.request.urlopen(
+                urllib.request.Request(url + "/health"),
+                timeout=TIMEOUT_LOCAL if _is_local(url) else TIMEOUT_REMOTE)
+            json.loads(r.read().decode("utf-8", "replace"))
+        except Exception:
+            return False
+        try:
+            stats = cls._stats(url)
+        except Exception:
+            return False
+        return isinstance(stats, dict)
+
+    @classmethod
+    def _stats(cls, url):
+        r = urllib.request.urlopen(
+            urllib.request.Request(url + "/v1/stats"),
+            timeout=TIMEOUT_LOCAL if _is_local(url) else TIMEOUT_REMOTE)
+        body = json.loads(r.read().decode("utf-8", "replace"))
+        # unwrap one level of envelope if present ({stats: {...}})
+        if isinstance(body, dict) and isinstance(body.get("stats"), dict):
+            return body["stats"]
+        return body
+
+    @staticmethod
+    def _pick(d, *keys):
+        for k in keys:
+            if isinstance(d, dict) and d.get(k) is not None:
+                return d[k]
+        return None
+
+    def poll(self):
+        try:
+            stats = self._stats(self.url)
+        except Exception:
             return self._finish({"up": False, "state": "error"})
-        rec = {
-            "up": True,
-            "state": "running" if counters.get("vllm:num_requests_running", 0)
-                    else "idle",
-            "counters": {"prompt_tokens": counters.get("vllm:prompt_tokens_total"),
-                         "output_tokens": counters.get("vllm:generation_tokens_total")},
-            "queue": int(counters.get("vllm:num_requests_waiting", 0) or 0),
-            "rates": self.rates(counters, t, self.RATES),
-        }
-        if not rec["rates"]:
-            rec.pop("rates")
-        return self._finish(rec, counters=counters)
+        if not isinstance(stats, dict):
+            return self._finish({"up": False, "state": "error"})
+
+        counters, rates, rec = {}, {}, {"up": True}
+
+        tok = self._pick(stats, "tokens_generated", "generated_tokens",
+                         "output_tokens", "tokens_predicted")
+        if _fval(tok) is not None:
+            counters["output_tokens"] = _fval(tok)
+        pr = self._pick(stats, "tokens_prompt", "prompt_tokens",
+                        "input_tokens")
+        if _fval(pr) is not None:
+            counters["prompt_tokens"] = _fval(pr)
+        cached = self._pick(stats, "tokens_cached", "cached_tokens",
+                            "prefix_cache_hit_tokens")
+        if _fval(cached) is not None:
+            counters["cached_tokens"] = _fval(cached)
+        if counters:
+            rec["counters"] = counters
+            t = time.time()
+            mapping = {}
+            if "output_tokens" in counters:
+                mapping["decode_tps"] = ("output_tokens", None)
+            if "prompt_tokens" in counters:
+                mapping["prefill_tps"] = ("prompt_tokens", None)
+            r = self.rates(counters, t, mapping)
+            if r:
+                rec["rates"] = r
+
+        q = self._pick(stats, "queue", "requests_waiting", "pending_requests")
+        if _fval(q) is not None:
+            rec["queue"] = int(_fval(q))
+
+        vram = self._pick(stats, "vram_used_gb", "vram_gb", "vram_used")
+        if _fval(vram) is not None:
+            rec.setdefault("extras", {})["vram_gb"] = round(_fval(vram), 2)
+
+        lat = self._pick(stats, "tokens_per_second", "decode_tokens_per_second",
+                         "throughput", "tps")
+        if _fval(lat) is not None:
+            rec.setdefault("extras", {})["server_tps"] = round(_fval(lat), 2)
+
+        busy = bool(q) or bool(self._pick(stats, "generating", "busy", "active"))
+        rec["state"] = "running" if busy else "idle"
+        return self._finish(rec, counters=counters or None)
+
+
+class SglangAdapter(Adapter):
+    """SGLang's OpenAI server (default 127.0.0.1:30000 --
+    python/sglang/srt/arg_groups/fields/serving.py:66 `port: A[int, ...] = 30000`).
+
+    Same lesson as vLLM: `enable_metrics` DEFAULTS TO FALSE
+    (fields/observability.py:70), so /metrics is absent on a stock server and
+    must never be treated as a liveness signal. /health, /health_generate,
+    /get_model_info and /v1/models are all served unconditionally
+    (srt/entrypoints/http_server.py).
+    """
+    type = "sglang"
+    default_port = 30000
+
+    RATES = {"decode_tps": ("sglang:generation_tokens_total", None),
+             "prefill_tps": ("sglang:prompt_tokens_total", None)}
+
+    @classmethod
+    def fingerprint(cls, url):
+        try:
+            r = urllib.request.urlopen(
+                urllib.request.Request(url + "/get_model_info"),
+                timeout=TIMEOUT_LOCAL if _is_local(url) else TIMEOUT_REMOTE)
+            json.loads(r.read().decode("utf-8", "replace"))
+        except Exception:
+            return False
+        try:
+            r = urllib.request.urlopen(
+                urllib.request.Request(url + "/v1/models"),
+                timeout=TIMEOUT_LOCAL if _is_local(url) else TIMEOUT_REMOTE)
+            body = json.loads(r.read().decode("utf-8", "replace"))
+        except Exception:
+            return False
+        return isinstance(body, dict) and isinstance(body.get("data"), list)
+
+    def poll(self):
+        t = time.time()
+        try:
+            models = self.get_json("/v1/models").get("data") or []
+        except Exception:
+            return self._finish({"up": False, "state": "error"})
+        rec = {"up": True, "state": "idle"}
+        if models:
+            rec["models"] = [{"id": m.get("id"), "loaded": True,
+                              "size_bytes": None, "vram_bytes": None,
+                              "ctx": _i(m.get("max_model_len")
+                                        or m.get("context_length")),
+                              "expires": None}
+                             for m in models if isinstance(m, dict)]
+            rec["state"] = "running"
+        # Optional Prometheus: only present with --enable-metrics.
+        try:
+            parsed = parse_prom(self.get_text("/metrics"))
+        except Exception:
+            parsed = {}
+        if any(k.startswith("sglang:") for k in parsed):
+            rec["queue"] = int(parsed.get("sglang:num_requests_waiting", 0) or 0)
+            rec["counters"] = {
+                "prompt_tokens": parsed.get("sglang:prompt_tokens_total"),
+                "output_tokens": parsed.get("sglang:generation_tokens_total")}
+            r = self.rates(parsed, t, self.RATES)
+            if r:
+                rec["rates"] = r
+            if parsed.get("sglang:num_requests_running", 0):
+                rec["state"] = "running"
+        return self._finish(rec, counters=parsed or None)
+
+
+class KoboldCppAdapter(Adapter):
+    """KoboldCpp (LostRuins/koboldcpp, default 127.0.0.1:5001 --
+    koboldcpp.py:130 `defaultport = 5001`).
+
+    It IS OpenAI-compatible (/v1/models, /v1/chat/completions) but has no
+    Prometheus and no /metrics. Its /slots answers 501 "This server does not
+    support slots endpoint", so there are no KV session rows to report -- the
+    card carries models and window only. /api/v1/model returns {"result": name},
+    a shape no OpenAI-compatible server here uses, which makes a clean fingerprint.
+
+    Note it also serves a llama.cpp-shaped /props (with default_generation_settings),
+    so LlamaCppAdapter.fingerprint excludes it explicitly -- the same treatment
+    Strata already gets.
+    """
+    type = "koboldcpp"
+    default_port = 5001
+
+    @classmethod
+    def fingerprint(cls, url):
+        try:
+            r = urllib.request.urlopen(
+                urllib.request.Request(url + "/api/v1/model"),
+                timeout=TIMEOUT_LOCAL if _is_local(url) else TIMEOUT_REMOTE)
+            body = json.loads(r.read().decode("utf-8", "replace"))
+        except Exception:
+            return False
+        return isinstance(body, dict) and isinstance(body.get("result"), str)
+
+    def poll(self):
+        rec = {"up": True, "state": "idle"}
+        try:
+            body = self.get_json("/api/v1/model")
+            name = body.get("result")
+            if isinstance(name, str) and name:
+                rec["models"] = [{"id": name, "loaded": True,
+                                  "size_bytes": None, "vram_bytes": None,
+                                  "ctx": None, "expires": None}]
+                rec["state"] = "running"
+        except Exception:
+            return self._finish({"up": False, "state": "error"})
+        # max_length is the live context budget; max_context_length is the cap.
+        try:
+            ml = _i((self.get_json("/api/v1/config/max_length") or {}).get("value"))
+            if ml:
+                rec["window"] = ml
+                if rec.get("models"):
+                    rec["models"][0]["ctx"] = ml
+        except Exception:
+            pass
+        return self._finish(rec)
+
+
+class TabbyApiAdapter(Adapter):
+    """TabbyAPI (theroyallab/tabbyAPI), ExLlamaV3's API server; default
+    127.0.0.1:5000 (tabby_config.yml `network.port: 5000`). OpenAI-compatible
+    (/v1/models, /v1/chat/completions, /v1/completions) with no Prometheus."""
+    type = "tabbyapi"
+    default_port = 5000
+
+    @classmethod
+    def fingerprint(cls, url):
+        # /tabby/config is the ExLlamaV3 admin namespace: only TabbyAPI serves
+        # it, and nothing else here does. Deliberately NOT falling back to the
+        # bare OpenAI model list -- on port 5000 that would happily match any
+        # OpenAI-compatible server and mislabel it as TabbyAPI.
+        try:
+            r = urllib.request.urlopen(
+                urllib.request.Request(url + "/tabby/config"),
+                timeout=TIMEOUT_LOCAL if _is_local(url) else TIMEOUT_REMOTE)
+            return r.status == 200
+        except Exception:
+            return False
+
+    def poll(self):
+        try:
+            cfg = self.get_json("/tabby/config") or {}
+        except Exception:
+            return self._finish({"up": False, "state": "error"})
+        rec = {"up": True, "state": "idle"}
+        try:
+            data = self.get_json("/v1/models").get("data") or []
+        except Exception:
+            data = []
+        if data:
+            rec["models"] = [{"id": m.get("id"), "loaded": True,
+                              "size_bytes": None, "vram_bytes": None,
+                              "ctx": _i(cfg.get("context_length")),
+                              "expires": None}
+                             for m in data if isinstance(m, dict)]
+            rec["state"] = "running"
+        ctx = _i(cfg.get("context_length"))
+        if ctx:
+            rec["window"] = ctx
+        return self._finish(rec)
+
+
+class LocalAIAdapter(Adapter):
+    """LocalAI (mudler/LocalAI), default 127.0.0.1:8080 (--address default
+    `:8080`). It IS OpenAI-compatible and serves Prometheus /metrics
+    (core/http/metrics.go -> promhttp.Handler()), but until this adapter existed
+    it matched the generic `openai` fingerprint on 8080 and was labelled
+    "OpenAI" with no counters.
+
+    /healthz answers 204 No Content (core/http/routes/health.go) -- an empty
+    body on that exact path is distinctive, and no other engine here serves it.
+    """
+    type = "localai"
+    default_port = 8080
+
+    RATES = {"decode_tps": ("localai_completion_tokens_total", None)}
+
+    @classmethod
+    def fingerprint(cls, url):
+        try:
+            r = urllib.request.urlopen(
+                urllib.request.Request(url + "/healthz"),
+                timeout=TIMEOUT_LOCAL if _is_local(url) else TIMEOUT_REMOTE)
+            body = r.read(64)
+        except Exception:
+            return False
+        return r.status == 204 and not body.strip()
+
+    def poll(self):
+        t = time.time()
+        try:
+            data = self.get_json("/v1/models").get("data") or []
+        except Exception:
+            return self._finish({"up": False, "state": "error"})
+        rec = {"up": True, "state": "running" if data else "idle"}
+        if data:
+            rec["models"] = [{"id": m.get("id"), "loaded": True,
+                              "size_bytes": None, "vram_bytes": None,
+                              "ctx": _i(m.get("context_length")),
+                              "expires": None}
+                             for m in data if isinstance(m, dict)]
+        try:
+            parsed = parse_prom(self.get_text("/metrics"))
+        except Exception:
+            parsed = {}
+        keys = ("localai_completion_tokens_total", "localai_prompt_tokens_total",
+                "llamacpp:prompt_tokens_total", "llamacpp:tokens_predicted_total")
+        if any(k in parsed for k in keys):
+            rec["counters"] = {
+                "prompt_tokens": parsed.get("localai_prompt_tokens_total"),
+                "output_tokens": parsed.get("localai_completion_tokens_total")}
+            r = self.rates(parsed, t, self.RATES)
+            if r:
+                rec["rates"] = r
+        return self._finish(rec, counters=parsed or None)
 
 
 class LmStudioAdapter(Adapter):
@@ -569,6 +964,11 @@ ADAPTERS = {
     "ollama": OllamaAdapter,
     "llamacpp": LlamaCppAdapter,
     "vllm": VllmAdapter,
+    "sglang": SglangAdapter,
+    "freetoken": FreeTokenAdapter,
+    "koboldcpp": KoboldCppAdapter,
+    "tabbyapi": TabbyApiAdapter,
+    "localai": LocalAIAdapter,
     "lmstudio": LmStudioAdapter,
     "unsloth": UnslothAdapter,
     "openai": OpenAIAdapter,
@@ -578,7 +978,10 @@ ADAPTERS = {
 # card labels for engines found by discovery (configured engines use
 # their [[engine]] name)
 TYPE_LABELS = {"ollama": "Ollama", "llamacpp": "llama.cpp", "vllm": "vLLM",
-               "lmstudio": "LM Studio", "unsloth": "Unsloth", "openai": "OpenAI"}
+               "sglang": "SGLang", "freetoken": "FreeToken",
+               "koboldcpp": "KoboldCpp", "tabbyapi": "TabbyAPI",
+               "localai": "LocalAI", "lmstudio": "LM Studio",
+               "unsloth": "Unsloth", "openai": "OpenAI"}
 
 
 def make_adapter(eng, port=None):
@@ -618,9 +1021,11 @@ class Scheduler:
     TICK = 0.25
 
     def __init__(self, adapters, discovery_enabled=True, claimed_ports=None,
-                 on_result=None, on_event=None, on_discover=None):
+                 on_result=None, on_event=None, on_discover=None,
+                 discovery_hosts=None):
         self.discovery_enabled = discovery_enabled
         self.claimed_ports = claimed_ports
+        self.discovery_hosts = list(discovery_hosts or ())
         self.on_result = on_result
         self.on_event = on_event
         self.on_discover = on_discover
@@ -644,30 +1049,36 @@ class Scheduler:
     # -- discovery -----------------------------------------------------------
 
     def _claimed(self):
-        ports = set()
+        """(host, port) pairs discovery must not touch: every configured
+        engine's own endpoint, plus the legacy localhost ports handed over by
+        claimed_ports(). Keying on host AND port is what lets a remote 8080 be
+        discovered while a local 8080 is already claimed."""
+        pairs = set()
         for a in list(self.engines.values()):
             u = a["adapter"].url
             try:
-                ports.add(urllib.request.urlparse(u).port or 0)
+                p = urllib.request.urlparse(u)
+                pairs.add((p.hostname or LOCAL_HOST, p.port or 0))
             except Exception:
                 pass
         if self.claimed_ports is not None:
             try:
-                ports.update(self.claimed_ports())
+                # legacy callback: bare localhost ports
+                pairs.update((LOCAL_HOST, p) for p in self.claimed_ports())
             except Exception:
                 pass
-        return ports
+        return pairs
 
     def discovery(self):
         claimed = self._claimed()
         found = []
-        for port, types in DISCOVERY:
-            if port in claimed:
+        for host, port, types in discovery_targets(self.discovery_hosts):
+            if (host, port) in claimed:
                 continue
-            base = "http://127.0.0.1:%d" % port
+            base = "http://%s:%d" % (host, port)
             # Strata has its own poller and passes the llama.cpp and OpenAI fingerprints; at startup it
             # may not be claimed yet (its poller has not answered), so ask the server who it is.
-            if _is_strata(base):
+            if host == LOCAL_HOST and _is_strata(base):
                 continue
             for tname in types:
                 try:
@@ -677,9 +1088,9 @@ class Scheduler:
                 if ok:
                     a = make_adapter({"type": tname, "url": base}, port=port)
                     self.add(a)
-                    found.append((port, a))
+                    found.append((base, a))
                     break
-        for port, a in found:
+        for base, a in found:
             if self.on_discover is not None:
                 self.on_discover(a)
             self._poll(a, first=True)
