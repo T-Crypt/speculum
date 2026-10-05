@@ -751,8 +751,10 @@ class History:
     # shared across threads.
 
     def _reader(self):
-        return sqlite3.connect("file:%s?mode=ro" % self.path, uri=True,
-                               timeout=5.0, check_same_thread=False)
+        # as_uri(): forward slashes + file:/// form, correct on both
+        # Windows (backslash paths) and Linux; resolve() covers relative paths.
+        return sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro",
+                               uri=True, timeout=5.0, check_same_thread=False)
 
     def history(self, range_, engine=None):
         """Rollups for the range: 6h/24h from rollup_1m, 7d/30d from

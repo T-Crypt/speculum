@@ -8,7 +8,7 @@ a 1 Hz feed.
 ## Architecture (two parts, zero build)
 
 ```
-nvidia-smi · /proc · llama-swap :9090 · NInfer backend (port from /running proxy) · Strata :8080
+nvidia-smi · host metrics (hostinfo.py) · llama-swap :9090 · NInfer backend (port from /running proxy) · Strata :8080
         │ (each optional; all poll threads degrade to "no data")
         ▼
 collector/speculum.py  — one Python 3 process, daemon threads, shared State under one RLock
@@ -34,6 +34,7 @@ app.js  — EventSource with snapshot-poll fallback; owns paint loop, all panels
 |File|Owns|
 |---|---|
 |`collector/speculum.py`|All live data: GPU/host/llama-swap/NInfer/Strata poll threads, `State`, KPI assembly @ 1 Hz, snapshot/tick, HTTP server. Stdlib only.|
+|`collector/hostinfo.py`|Host metrics behind one interface, two backends: Linux reads `/proc` (CPU total/per-core, meminfo, loadavg, uptime, RSS of llama-server / ninfer-serve / strata); Windows uses Win32 via `ctypes` (`GlobalMemoryStatusEx`, `GetSystemTimes`, `NtQuerySystemInformation` per-core, `EnumProcesses`+psapi, `GetTickCount64`; `load()` is None — no load average). The only module that touches system/process stats; `speculum.py`'s host thread and `ninfer_serve_port()` call into it.|
 |`collector/history.py`|SQLite history: one writer thread, 10 s commits, requests held 130 s for the merge window, minute/hour rollups, daily prune, `/api/history`, `/api/requests`, `/api/storage`, `/api/export`. `retention_days = 0` is a no-op. Stdlib `sqlite3` only.|
 |`collector/engines.py`, `collector/config.py`|Engine adapters + the single backoff scheduler; `speculum.toml` loader.|
 |`collector/speculum.service`|systemd `--user` unit. `CUDA_VISIBLE_DEVICES=` (GPU stays the llama-swap's), 64 M ceiling, nice 10.|
