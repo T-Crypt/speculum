@@ -180,7 +180,7 @@ if IS_WINDOWS:
         if _kernel32.GetSystemTimes(ctypes.byref(idle),
                                     ctypes.byref(kernel),
                                     ctypes.byref(user)):
-            total = (user.quad + kernel.quad, idle.quad)
+            total = (user.value + kernel.value, idle.value)
         return total, _win_cpu_cores()
 
     def _win_cpu_cores():
@@ -233,8 +233,8 @@ if IS_WINDOWS:
         found = []
         pids_buf = ctypes.create_string_buffer(65536)   # 16384 PIDs
         needed = wintypes.DWORD(0)
-        if not _kernel32.EnumProcesses(pids_buf, ctypes.sizeof(pids_buf),
-                                       ctypes.byref(needed)):
+        if not _psapi.EnumProcesses(pids_buf, ctypes.sizeof(pids_buf),
+                                   ctypes.byref(needed)):
             return found
         n = needed.value // 4
         pids = struct.unpack_from("%dI" % n, pids_buf.raw)
