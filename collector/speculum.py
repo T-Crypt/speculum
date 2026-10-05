@@ -11,8 +11,9 @@ Sources (each optional, degrades cleanly):
 
     GPU      ONE long-lived nvidia-smi subprocess (-lms 1000), read line by
              line. The collector never opens a CUDA/NVML context itself.
-    host     /proc/stat (total + per core), /proc/meminfo, /proc/loadavg,
-             /proc/uptime, VmRSS of llama-server / ninfer-serve / strata.
+    host     via hostinfo.py — Linux: /proc (CPU total/per-core, meminfo,
+             loadavg, uptime); Windows: Win32 via ctypes — plus RSS of
+             llama-server / ninfer-serve / strata processes.
     llama-swap  http://127.0.0.1:9090  /running, /v1/models,
              /api/metrics/activity, /api/events, /logs/stream/<model>
     NInfer backend  (port from /running "proxy", e.g. 127.0.0.1:5803)
@@ -44,6 +45,7 @@ from pathlib import Path
 import config as spec_config
 import engines
 import history
+import hostinfo
 
 ROOT = Path(__file__).resolve().parent.parent
 HOST = "127.0.0.1"
@@ -65,7 +67,6 @@ GPU_CMD = [
     "--format=csv,noheader,nounits", "-lms", "1000",
 ]
 
-PROC_PATTERNS = ("llama-server", "ninfer-serve", "strata")
 
 KPI_KEYS = ["tps", "rpm", "p95", "ttft", "tpot", "vram", "cache", "queue", "reingest", "mtp"]
 
@@ -286,84 +287,8 @@ def gpu_thread():
 
 
 # --------------------------------------------------------------------------
-# host: /proc sampling
+# host: sampling via hostinfo (Linux: /proc; Windows: Win32 ctypes)
 # --------------------------------------------------------------------------
-
-def read_cpu_times():
-    cores, total = [], None
-    try:
-        with open("/proc/stat") as f:
-            for line in f:
-                if line.startswith("cpu"):
-                    parts = line.split()
-                    if not parts[1:]:
-                        continue
-                    idle = int(parts[4]) + (int(parts[5]) if len(parts) > 5 else 0)
-                    total_v = sum(int(x) for x in parts[1:])
-                    vals = (total_v, idle)
-                    if line.startswith("cpu "):
-                        total = vals
-                    else:
-                        cores.append(vals)
-    except OSError:
-        pass
-    return total, cores
-
-
-def read_meminfo():
-    info = {}
-    try:
-        with open("/proc/meminfo") as f:
-            for line in f:
-                k, v = line.split(":", 1)
-                info[k] = int(v.strip().split()[0])
-    except OSError:
-        pass
-    total = info.get("MemTotal", 0)
-    avail = info.get("MemAvailable", 0)
-    return {
-        "ram_total_gb": total / 1e6,
-        "ram_used_gb": max(0.0, (total - avail)) / 1e6 if total else 0.0,
-        "swap_total_gb": info.get("SwapTotal", 0) / 1e6,
-        "swap_used_gb": (info.get("SwapTotal", 0) - info.get("SwapFree", 0)) / 1e6,
-    }
-
-
-def scan_procs():
-    found = []
-    try:
-        pids = [d for d in os.listdir("/proc") if d.isdigit()]
-    except OSError:
-        return found
-    for pid in pids:
-        try:
-            with open("/proc/%s/cmdline" % pid, "rb") as f:
-                cmd = f.read(512).replace(b"\0", b" ").decode("utf-8", "replace").strip()
-        except OSError:
-            continue
-        name = None
-        if "llama-server" in cmd:
-            name = "llama-server"
-        elif "ninfer-serve" in cmd:
-            name = "ninfer-serve"
-        elif "server.py" in cmd and "strata" in cmd:
-            name = "strata"
-        if name is None:
-            continue
-        rss_kb = None
-        try:
-            with open("/proc/%s/status" % pid) as f:
-                for line in f:
-                    if line.startswith("VmRSS:"):
-                        rss_kb = int(line.split()[1])
-                        break
-        except OSError:
-            pass
-        found.append({"name": name, "pid": int(pid),
-                      "rss_gb": round(rss_kb / 1e6, 2) if rss_kb else None,
-                      "cmd": cmd[:120]})
-    return found
-
 
 def host_thread():
     prev_total, prev_cores = None, []
@@ -371,7 +296,7 @@ def host_thread():
     next_scan = 0.0
     while True:
         t = now()
-        total, cores = read_cpu_times()
+        total, cores = hostinfo.cpu_times()
         sample = {}
         if total and prev_total:
             dt = total[0] - prev_total[0]
@@ -387,17 +312,15 @@ def host_thread():
                             per.append(0.0)
                 sample["cpu_per_core"] = per
         prev_total, prev_cores = total, cores
-        sample.update(read_meminfo())
-        try:
-            sample["load"] = [float(x) for x in open("/proc/loadavg").read().split()[:3]]
-        except OSError:
-            pass
-        try:
-            sample["uptime_s"] = float(open("/proc/uptime").read().split()[0])
-        except OSError:
-            pass
+        sample.update(hostinfo.memory())
+        load = hostinfo.load()
+        if load is not None:
+            sample["load"] = load
+        up = hostinfo.uptime_s()
+        if up is not None:
+            sample["uptime_s"] = up
         if t >= next_scan:
-            procs = scan_procs()
+            procs = hostinfo.processes()
             next_scan = t + 15
         sample["procs"] = procs
         sample["t"] = t
@@ -1519,6 +1442,8 @@ def start_scheduler(cfg):
 
 def main():
     global PORT, HIST
+    if sys.stdout is None:       # pythonw / no console: a print would crash
+        sys.stdout = sys.stderr = open(os.devnull, "w")
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=None)
     ap.add_argument("--config", default=None,
@@ -1574,17 +1499,15 @@ def main():
 
 def ninfer_serve_port():
     """The port of a running ninfer-serve process (started by hand, not by llama-swap), or None.
-    ninfer-serve listens on --port, default 8080 (its serve_options)."""
-    for pid in os.listdir("/proc"):
-        if not pid.isdigit():
+    ninfer-serve listens on --port, default 8080 (its serve_options). On
+    Windows the process argv is not available, so a found process resolves
+    to the default port."""
+    for p in hostinfo.processes():
+        if p["name"] != "ninfer-serve":
             continue
-        try:
-            argv = open("/proc/%s/cmdline" % pid, "rb").read().split(b"\0")
-        except OSError:
-            continue
-        if not argv or b"ninfer-serve" not in os.path.basename(argv[0]):
-            continue
-        return ninfer_port_of([a.decode("utf-8", "replace") for a in argv])
+        port = ninfer_port_of(p["cmd"].split())
+        if port:
+            return port
     return None
 
 

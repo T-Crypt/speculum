@@ -47,6 +47,22 @@ publish tailnet-only with `tailscale serve`.
 
 The unit assumes the checkout is at `~/speculum` — if yours lives elsewhere,
 point `ExecStart` at it.
+**Windows** — the same command, `python` instead of `python3`:
+
+```sh
+python collector\speculum.py            # → http://127.0.0.1:8792/
+```
+
+Python 3.11+ from python.org (3.9–3.10 works without a `speculum.toml`).
+Host metrics (CPU, RAM + page file, uptime; load average shows as n/a)
+come from the Win32 API via `collector/hostinfo.py`; if `nvidia-smi` is
+on PATH, GPU readings work exactly as on Linux.
+
+For 24/7, schedule a Task Scheduler task instead of the systemd unit:
+action `pythonw.exe <repo>\collector\speculum.py`, start in the repo
+root, run whether the user is logged on or not, restart on failure. The
+history database lives in `%LOCALAPPDATA%\Speculum\speculum.db`; an
+optional config file in `%APPDATA%\Speculum\speculum.toml`.
 
 **Configuration** is optional: copy `speculum.example.toml` to
 `speculum.toml` (repo root or `~/.config/speculum/`) and edit. With no config
@@ -64,7 +80,7 @@ shape as live data, so the page is identical in behaviour.
 ## How it works
 
 ```
-nvidia-smi · /proc · llama-swap :9090 · NInfer backend · Strata :8080 · other engines
+nvidia-smi · host metrics (hostinfo.py) · llama-swap :9090 · NInfer backend · Strata :8080 · other engines
         │  (each optional; every poll degrades to "no data")
         ▼
 collector/speculum.py   one Python 3 process, daemon poll threads,
@@ -106,7 +122,7 @@ light theme).
 | Source | Feeds |
 |---|---|
 | `nvidia-smi` (one long-lived `-lms 1000` subprocess, read line by line) | GPU name/driver, temperature, utilisation, power, VRAM |
-| `/proc/stat` `/proc/meminfo` `/proc/loadavg` `/proc/uptime` | host CPU, RAM, load, uptime, top processes |
+| `collector/hostinfo.py` (Linux: `/proc` · Windows: Win32) | host CPU (total + per core), RAM + page file, load (n/a on Windows), uptime, top engine processes |
 | llama-swap `:9090` (`/running`, `/v1/models`, `/api/metrics/activity`, `/api/events`) | models in use, per-request records (cached vs fresh prompt, outputs, TTFT), event stream |
 | NInfer backend (port from llama-swap `/running`, e.g. `:5803`) — `/metrics`, `/slots`, log stream | decode/prefill tok/s, KV slots, per-request TTFT/queue/prefill/decode/MTP, engine latch alerts |
 | Strata `:8080` (`/v1/models`, `/metrics`, `/slots`) | second engine + context slots |
@@ -165,9 +181,10 @@ Keys: `P` pause · `R` reseed (demo) / resync (live).
 | `app.js` | feed (SSE + poll fallback), `?demo` simulator, paint loop, all panels |
 | `ui.js` · `viewmodel.js` · `ripple.js` | DOM primitives and formatters · pure view-model adapters · optional ripple effect |
 | `collector/speculum.py` | stdlib-only collector and HTTP server (Python 3, one process) |
+| `collector/hostinfo.py` | host metrics, two backends: `/proc` on Linux, Win32 via ctypes on Windows |
 | `collector/history.py` | SQLite history: writer thread, rollups, spans, storage/export API |
 | `collector/engines.py` · `collector/config.py` | engine adapters + backoff scheduler · `speculum.toml` loader |
-| `collector/speculum.service` | systemd `--user` unit |
+| `collector/speculum.service` | systemd `--user` unit (Linux; on Windows: Task Scheduler) |
 | `speculum.example.toml` | example configuration |
 | `smoke/` | Node DOM-stub smoke tests (no browser needed) |
 | `LICENSE` | MIT license |
