@@ -73,5 +73,33 @@ class TestKpiPassTpsModels(unittest.TestCase):
         self.assertEqual(S.kpi["last"]["tps_models"], [])
 
 
+class TestBuiltinEndpoints(unittest.TestCase):
+    """llama-swap and Strata can be moved off their stock ports, by url or by
+    the host/port shorthand, since the built-in threads are not discovery."""
+
+    def test_default_when_unset(self):
+        self.assertEqual(speculum.endpoint_url({}, "http://127.0.0.1:9090"),
+                         "http://127.0.0.1:9090")
+        self.assertEqual(speculum.endpoint_url(None, "http://127.0.0.1:9090"),
+                         "http://127.0.0.1:9090")
+
+    def test_url_override(self):
+        self.assertEqual(
+            speculum.endpoint_url({"url": "http://127.0.0.1:9091/"},
+                                  "http://127.0.0.1:9090"),
+            "http://127.0.0.1:9091")
+
+    def test_port_shorthand_overrides_default(self):
+        self.assertEqual(
+            speculum.endpoint_url({"port": 9091}, "http://127.0.0.1:9090"),
+            "http://127.0.0.1:9091")
+
+    def test_host_shorthand(self):
+        self.assertEqual(
+            speculum.endpoint_url({"host": "gpu.lan"},
+                                  "http://127.0.0.1:8080"),
+            "http://gpu.lan:8080")
+
+
 if __name__ == "__main__":
     unittest.main()

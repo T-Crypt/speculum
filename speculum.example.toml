@@ -13,17 +13,37 @@ enabled = true              # probe the default ports on localhost
 # tried first, so a local engine always wins its own port. Claims are keyed on
 # host:port, so a remote 8080 stays discoverable while a local 8080 is taken.
 # targets = ["10.0.0.41", "gpu-box.lan"]
+# Extra ports to probe on localhost and every target, for an engine running on
+# a non-default port. Each new port is tried with every adapter, openai last.
+# ports = [8081, 9091]
+
+# The built-in threads (llama-swap, and the NInfer backend that follows its
+# /running proxy) are not discovery. Move them off their stock ports with a
+# `port`, a `host`, or a full `url`.
+# [llama_swap]
+# port = 9091                # default http://127.0.0.1:9090
+#
+# [strata]
+# url = "http://127.0.0.1:8090"   # default http://127.0.0.1:8080
 
 [history]
 retention_days = 30         # 30, 60, 90 or 0 to turn history off
 
 # Any number of engines, on any host. Type names the adapter; the URL
-# may point anywhere (the collector is just an HTTP client).
+# may point anywhere (the collector is just an HTTP client). `port` and
+# `host` stand in for a full url, so an engine off its stock port is a
+# one-line change.
 
 [[engine]]
 name = "ollama-desk"
 type = "ollama"
 url  = "http://10.0.0.41:11434"
+
+# llama.cpp on a custom port: no URL needed, host defaults to 127.0.0.1.
+# [[engine]]
+# name = "llama.cpp"
+# type = "llamacpp"
+# port = 8081
 
 # llama-swap, NInfer and Strata are already watched by the built-in
 # threads; adding them here again is not needed (phase 1b folds those

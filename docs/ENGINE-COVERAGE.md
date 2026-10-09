@@ -30,6 +30,20 @@ nothing more specific recognised the server. `test_engines.py::FingerprintMatrix
 asserts this, and also asserts that no specific adapter ever claims the wrong
 engine.
 
+Every port above is only a default. An engine on a non-default port is found,
+or configured, three ways:
+
+- **`[[engine]] port` (or `host`).** A configured engine never needs a full
+  URL: `type = "llamacpp"` with `port = 8081` watches `127.0.0.1:8081`.
+- **`[discovery] ports = [...]`.** Adds ports to the probe sweep on localhost
+  and every `targets` host. A port already in the table keeps its ordered
+  adapters; a new one is tried with every specific adapter, generic `openai`
+  last.
+- **`[llama_swap]` / `[strata]`.** The built-in threads are not discovery;
+  override their `url`, `host` or `port`. NInfer follows llama-swap's
+  `/running` proxy, so it needs no port of its own. Configured ports are
+  skipped by discovery, so they are never mistaken for a separate engine.
+
 ## Supported
 
 | Engine | Port | Fingerprint | Counters / rates | Sessions | Source of the port claim |

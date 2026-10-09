@@ -97,6 +97,8 @@ Every source is optional. Each poll degrades to "no data".
 | Strata `:8080` (`/v1/models`, `/metrics`, `/slots`) | second engine plus context slots |
 | any engine in `speculum.toml` | the same fields through the pluggable adapters |
 
+Ports in this table are the defaults; each can be moved. See [Custom ports](#custom-ports).
+
 ## Configuration
 
 Config is optional. With no file, Speculum probes the default ports on localhost and shows what it finds. Copy `speculum.example.toml` to `speculum.toml` in the repo root or in `~/.config/speculum/` to change anything.
@@ -118,6 +120,41 @@ url  = "http://10.0.0.41:11434"
 The file sets the bind address and port, discovery targets, history retention, alert thresholds, and engine adapters on any host. Discovery probes localhost first, so a local engine wins its own port. `api_key_env` names the environment variable holding a bearer token; Speculum sends it as `Authorization` and keeps the secret out of the file.
 
 Adapters: `ollama`, `llamacpp`, `vllm`, `sglang`, `freetoken`, `koboldcpp`, `tabbyapi`, `localai`, `lmstudio`, `unsloth`, `openai`, `custom`. [`docs/ENGINE-COVERAGE.md`](docs/ENGINE-COVERAGE.md) explains how each adapter recognises a server and which engines stay unsupported.
+
+### Custom ports
+
+An engine does not have to sit on its stock port. There are three ways to point Speculum at another one; pick whichever fits.
+
+**1. Give an engine a `port` (or `host`).** When you configure an engine, `port` and `host` stand in for a full `url`. This is the quickest way to move llama.cpp off 8080:
+
+```toml
+[[engine]]
+name = "llama.cpp"
+type = "llamacpp"
+port = 8081                 # host defaults to 127.0.0.1
+```
+
+`host = "10.0.0.41"` watches another box, and `port` alone leaves the default host. A `url` still works and can be combined with `port` to override just the port.
+
+**2. Add extra discovery ports.** Discovery normally probes the ports in the table under [What it watches](#what-it-watches). `[discovery] ports` adds ports to that sweep on localhost and every `targets` host, so an engine on a non-default port is found and registered like any other:
+
+```toml
+[discovery]
+enabled = true
+ports   = [8081, 9091]      # probed with every adapter, generic openai last
+```
+
+**3. Move the built-in threads.** `llama-swap`, `Strata` and the NInfer backend that follows llama-swap are watched by dedicated threads, not by discovery. Point them elsewhere with `[llama_swap]` and `[strata]`, using `url`, or `host` / `port`:
+
+```toml
+[llama_swap]
+port = 9091                 # default http://127.0.0.1:9090
+
+[strata]
+url = "http://127.0.0.1:8090"   # default http://127.0.0.1:8080
+```
+
+NInfer has no port of its own: it rides the proxy llama-swap reports in `/running`, so fixing `[llama_swap]` is enough. Ports configured here are skipped by discovery, so they are never mistaken for a separate engine.
 
 ## Demo mode
 

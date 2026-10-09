@@ -18,7 +18,13 @@ from pathlib import Path
 
 DEFAULTS = {
     "server": {"host": "127.0.0.1", "port": 8792},
-    "discovery": {"enabled": True},
+    # `ports` adds non-default localhost/target ports to the discovery probe
+    # list, for an engine running somewhere other than its stock port.
+    "discovery": {"enabled": True, "ports": []},
+    # Built-in threads (not the adapter scheduler). Override `url`, or give a
+    # `host` / `port`, when llama-swap or Strata runs on a non-default port.
+    "llama_swap": {"url": "http://127.0.0.1:9090"},
+    "strata": {"url": "http://127.0.0.1:8080"},
     "history": {"retention_days": 30},   # 30, 60, 90 or 0 to turn off
     # Threshold alerts, each held for hold_s before it fires. vram_pct is high on
     # purpose: engines fill the card by design; the useful VRAM alert is a foreign process holding it.
@@ -53,7 +59,8 @@ def _clean_engine(e):
     or unknown tables (a [[engine]] with no type is an error, not a
     discovery candidate)."""
     out = {}
-    for k in ("name", "type", "url", "parent", "api_key_env", "optional",
+    for k in ("name", "type", "url", "host", "port", "parent",
+              "api_key_env", "optional",
               "health", "models", "metrics", "slots", "map"):
         if k in e:
             out[k] = e[k]
@@ -76,6 +83,8 @@ def load(path=None):
     cfg = {
         "server": dict(DEFAULTS["server"]),
         "discovery": dict(DEFAULTS["discovery"]),
+        "llama_swap": dict(DEFAULTS["llama_swap"]),
+        "strata": dict(DEFAULTS["strata"]),
         "history": dict(DEFAULTS["history"]),
         "alerts": dict(DEFAULTS["alerts"]),
         "engine": [],
@@ -86,6 +95,8 @@ def load(path=None):
     raw = tomllib.loads(used.read_text(encoding="utf-8"))
     _merge(cfg["server"], raw.get("server"))
     _merge(cfg["discovery"], raw.get("discovery"))
+    _merge(cfg["llama_swap"], raw.get("llama_swap"))
+    _merge(cfg["strata"], raw.get("strata"))
     _merge(cfg["history"], raw.get("history"))
     _merge(cfg["alerts"], raw.get("alerts"))
     for e in raw.get("engine") or []:

@@ -51,18 +51,43 @@ DISCOVERY = [
 ]
 
 
-def discovery_targets(extra_hosts=()):
+def discovery_targets(extra_hosts=(), extra_ports=()):
     """(host, port, adapter types) triples to probe: localhost on every port,
     then each extra host on the same port list. Localhost comes first so a
-    local engine always wins its own port over a remote one."""
+    local engine always wins its own port over a remote one.
+
+    `extra_ports` are non-default ports ([discovery] ports in speculum.toml).
+    A port the table already knows keeps its ordered types; a new one is
+    probed with every specific adapter, generic `openai` last."""
+    ports = list(DISCOVERY)
+    known = {p for p, _types in DISCOVERY}
+    for p in extra_ports or ():
+        try:
+            p = int(p)
+        except (TypeError, ValueError):
+            continue
+        if p and p not in known:
+            known.add(p)
+            ports.append((p, _all_discovery_types()))
     hosts = []
     for h in extra_hosts or ():
         h = str(h).strip()
         if h and h not in hosts and h not in LOCAL_HOSTS:
             hosts.append(h)
-    out = [(LOCAL_HOST, port, types) for port, types in DISCOVERY]
-    out.extend((h, port, types) for h in hosts for port, types in DISCOVERY)
+    out = [(LOCAL_HOST, port, types) for port, types in ports]
+    out.extend((h, port, types) for h in hosts for port, types in ports)
     return out
+
+
+def _all_discovery_types():
+    """Every discoverable adapter, each once, generic `openai` last. Used for
+    ports [discovery] ports adds that the built-in table does not know."""
+    out = []
+    for _port, types in DISCOVERY:
+        for t in types:
+            if t not in out:
+                out.append(t)
+    return tuple([t for t in out if t != "openai"] + ["openai"])
 
 
 def parse_prom(text):
@@ -984,16 +1009,42 @@ TYPE_LABELS = {"ollama": "Ollama", "llamacpp": "llama.cpp", "vllm": "vLLM",
                "unsloth": "Unsloth", "openai": "OpenAI"}
 
 
+def engine_url(eng, cls=None, override_port=None):
+    """Endpoint for an [[engine]] table: an explicit `url`, or the `host` /
+    `port` shorthand (host defaults to 127.0.0.1, port to the adapter's own
+    default). `override_port` re-points a URL at another port without dropping
+    its host or path (discovery)."""
+    url = eng.get("url") or ""
+    host = eng.get("host") or None
+    port = eng.get("port")
+    default_port = getattr(cls, "default_port", None) if cls else None
+
+    def netloc(u, h, p):
+        parts = urllib.request.urlparse(u)
+        return "%s:%s" % (h or parts.hostname or "127.0.0.1", p)
+
+    if override_port is not None:
+        port = override_port
+    if port is not None:
+        url = (urllib.request.urlparse(url)._replace(
+                   netloc=netloc(url, host, port)).geturl()
+               if url else "http://%s:%s" % (host or "127.0.0.1", port))
+    elif host:
+        if url:
+            p = urllib.request.urlparse(url)
+            url = p._replace(
+                netloc=netloc(url, host, p.port or default_port)).geturl()
+        elif default_port:
+            url = "http://%s:%s" % (host, default_port)
+    return url
+
+
 def make_adapter(eng, port=None):
     """Build an adapter from a config [[engine]] table (a plain dict of
     type/url/...); `port` overrides the table's url port (discovery)."""
     etype = eng.get("type") or "custom"
     cls = ADAPTERS.get(etype, CustomAdapter)
-    url = eng.get("url") or ""
-    if port is not None and url:
-        p = urllib.request.urlparse(url)
-        url = p._replace(netloc=(p.hostname or "127.0.0.1") + ":" + str(port)
-                         ).geturl()
+    url = engine_url(eng, cls, override_port=port)
     a = cls(url=url or None, key=eng.get("name"), label=eng.get("name"),
             parent=eng.get("parent"), api_key_env=eng.get("api_key_env"))
     a.optional = bool(eng.get("optional"))   # down is normal: no alert (speculum.toml)
@@ -1022,10 +1073,11 @@ class Scheduler:
 
     def __init__(self, adapters, discovery_enabled=True, claimed_ports=None,
                  on_result=None, on_event=None, on_discover=None,
-                 discovery_hosts=None):
+                 discovery_hosts=None, discovery_ports=None):
         self.discovery_enabled = discovery_enabled
         self.claimed_ports = claimed_ports
         self.discovery_hosts = list(discovery_hosts or ())
+        self.discovery_ports = list(discovery_ports or ())
         self.on_result = on_result
         self.on_event = on_event
         self.on_discover = on_discover
@@ -1072,7 +1124,8 @@ class Scheduler:
     def discovery(self):
         claimed = self._claimed()
         found = []
-        for host, port, types in discovery_targets(self.discovery_hosts):
+        for host, port, types in discovery_targets(self.discovery_hosts,
+                                                    self.discovery_ports):
             if (host, port) in claimed:
                 continue
             base = "http://%s:%d" % (host, port)

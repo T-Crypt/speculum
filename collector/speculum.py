@@ -702,7 +702,7 @@ def logs_thread():
         e = S.engine("ninfer", model, "ninfer", 262144)
         try:
             # /logs/stream/<model> is a plain text tail, not SSE frames
-            req = urllib.request.Request("http://127.0.0.1:9090/logs/stream/%s" % model,
+            req = urllib.request.Request(LLAMA_SWAP + "/logs/stream/%s" % model,
                                          headers={"Accept": "text/plain"})
             r = urllib.request.urlopen(req, timeout=PROBE_SLOW)
             while True:
@@ -1408,13 +1408,35 @@ def _port_of(u):
     return None
 
 
+def endpoint_url(tbl, default):
+    """The base URL for a built-in thread from its config table: `url`, or the
+    `host` / `port` shorthand on top of the default (e.g. llama-swap moved off
+    :9090). Always returned without a trailing slash."""
+    tbl = tbl or {}
+    url = tbl.get("url") or default
+    host, port = tbl.get("host"), tbl.get("port")
+    if port is not None or host:
+        p = urllib.request.urlparse(url)
+        url = p._replace(netloc="%s:%s" % (
+            host or p.hostname or "127.0.0.1", port if port is not None else p.port
+        )).geturl()
+    return url.rstrip("/")
+
+
 def claimed_ports():
-    """Ports the discovery probes must skip: llama-swap, Strata when up,
-    and the backend of any running entry (e.g. the NInfer proxy port)."""
-    ports = {9090}
+    """Ports the discovery probes must skip: llama-swap's port, Strata's while
+    it is up, and the backend of any running entry (e.g. the NInfer proxy
+    port). Llama-swap is always skipped so its port is never mistaken for an
+    engine; Strata's port is released for discovery when Strata is down."""
+    ports = set()
+    p = _port_of(LLAMA_SWAP)
+    if p:
+        ports.add(p)
     with lock:
         if S.strata.get("up"):
-            ports.add(8080)
+            p = _port_of(STRATA)
+            if p:
+                ports.add(p)
         for r in S.running or []:
             p = _port_of(r.get("proxy") or "")
             if p:
@@ -1471,8 +1493,10 @@ def start_scheduler(cfg):
         adapters,
         discovery_enabled=bool(disc.get("enabled", True)),
         # localhost is always probed; `targets` adds remote hosts on the same
-        # port list, for a collector running away from the inference box.
+        # port list, for a collector running away from the inference box, and
+        # `ports` adds non-default ports for engines off their stock port.
         discovery_hosts=disc.get("targets") or (),
+        discovery_ports=disc.get("ports") or (),
         claimed_ports=claimed_ports,
         on_result=on_engine_result,
         on_event=lambda lv, m: push_event(lv, m),
@@ -1484,7 +1508,7 @@ def start_scheduler(cfg):
 
 
 def main():
-    global PORT, HIST
+    global PORT, HIST, LLAMA_SWAP, STRATA
     if sys.stdout is None:       # pythonw / no console: a print would crash
         sys.stdout = sys.stderr = open(os.devnull, "w")
     ap = argparse.ArgumentParser()
@@ -1504,6 +1528,10 @@ def main():
     elif cfg.get("server", {}).get("port"):
         PORT = int(cfg["server"]["port"])
     host = cfg.get("server", {}).get("host") or HOST
+    # Built-in threads can be moved off their stock ports too. NInfer follows
+    # llama-swap's /running proxy, so it needs no separate port.
+    LLAMA_SWAP = endpoint_url(cfg.get("llama_swap"), "http://127.0.0.1:9090")
+    STRATA = endpoint_url(cfg.get("strata"), "http://127.0.0.1:8080")
 
     # SQLite history. retention_days 0 -> no-op object.
     retention = int((cfg.get("history") or {}).get("retention_days", 30) or 0)

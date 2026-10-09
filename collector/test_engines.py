@@ -868,6 +868,57 @@ class DiscoveryTargetsAndClaims(unittest.TestCase):
         self.assertEqual(s.discovery_hosts, ["10.0.0.41"])
 
 
+class CustomEnginePorts(unittest.TestCase):
+    """[[engine]] may name a port (or host) instead of spelling out a URL, so
+    moving llama.cpp off 8080 is a one-line change. [discovery] ports adds
+    non-default ports to the probe list, with openai always tried last."""
+
+    def test_port_shorthand_builds_url(self):
+        self.assertEqual(
+            engines.make_adapter({"type": "llamacpp", "port": 8081}).url,
+            "http://127.0.0.1:8081")
+        self.assertEqual(
+            engines.make_adapter({"type": "llamacpp", "host": "gpu.lan",
+                                  "port": 8081}).url,
+            "http://gpu.lan:8081")
+        # host alone keeps the adapter's own default port
+        self.assertEqual(
+            engines.make_adapter({"type": "vllm", "host": "10.0.0.9"}).url,
+            "http://10.0.0.9:8000")
+
+    def test_port_overrides_a_given_url(self):
+        a = engines.make_adapter({"type": "llamacpp",
+                                  "url": "http://127.0.0.1:8080", "port": 8081})
+        self.assertEqual(a.url, "http://127.0.0.1:8081")
+
+    def test_discovery_override_port_still_wins(self):
+        a = engines.make_adapter({"type": "llamacpp", "url": "http://h:1"},
+                                 port=8082)
+        self.assertEqual(a.url, "http://h:8082")
+
+    def test_extra_discovery_port_uses_all_types_openai_last(self):
+        t = engines.discovery_targets(extra_ports=[8081])
+        entry = next((e for e in t if e[1] == 8081), None)
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry[0], engines.LOCAL_HOST)
+        self.assertEqual(entry[2].index("openai"), len(entry[2]) - 1)
+        self.assertIn("llamacpp", entry[2])
+
+    def test_known_discovery_port_keeps_its_order(self):
+        t = engines.discovery_targets(extra_ports=[8080])
+        # 8080 is already in the table: no duplicate, order untouched
+        self.assertEqual(len([e for e in t if e[1] == 8080]), 1)
+
+    def test_extra_ports_probe_each_target_too(self):
+        t = engines.discovery_targets(["10.0.0.41"], extra_ports=[8081])
+        self.assertIn(("10.0.0.41", 8081, engines._all_discovery_types()), t)
+
+    def test_scheduler_passes_discovery_ports(self):
+        s = engines.Scheduler([], discovery_enabled=False,
+                              discovery_ports=[8081])
+        self.assertEqual(s.discovery_ports, [8081])
+
+
 class FingerprintMatrix(unittest.TestCase):
     """Every real engine, against every adapter fingerprint.
 
