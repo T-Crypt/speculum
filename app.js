@@ -30,7 +30,7 @@ const state = {
   paused: false,
   gpu: null,          // {name, driver, temp, util, power, powerLimit, vram, vramTotal, clockSm, clockMem, fan, pcie}
   host: null,         // {cpu, perCore[], ramUsed, ramTotal, load[], uptime, procs[]}
-  kpi: {},            // tps rpm p95 ttft tpot vram cache reingest mtp queue (ms for p95/ttft/tpot, GB for vram, % for cache/reingest/mtp)
+  kpi: {},            // tps rpm p95 ttft tpot vram cache reingest mtp queue (ms for p95/ttft/tpot, GB for vram, % for cache/reingest/mtp) + tps_models[] (model(s) behind the decode rate)
   kpiHist: {},        // key -> 1 Hz series
   engHist: {},        // engine key -> 1 Hz throughput series
   hostHist: { cpu: [], ram: [] },
@@ -195,6 +195,7 @@ function applyTick(d) {
     state.kpi[k] = d.kpi ? d.kpi[k] : state.kpi[k];
     pushHist(state.kpiHist[k], d.kpi ? d.kpi[k] : null);
   }
+  if (d.kpi && d.kpi.tps_models != null) state.kpi.tps_models = d.kpi.tps_models;
   state.strata.up = d.strata_up != null ? d.strata_up : state.strata.up;
   state.alerts = d.alerts || state.alerts;
   syncEnginesFromTick(d);
@@ -352,6 +353,7 @@ let demo = null;
 function initDemo() {
   demo = {
     tps: 140, rpm: 60, p95: 340, ttft: 210, tpot: 26, cache: 62, queue: 3,
+    model: DEMO_MODELS[0].label,   // the model the sim's decode rate tracks (swaps occasionally)
     gpu: { name: 'RTX 4090 (sim)', driver: '615.71.09 (sim)', temp: 61, util: 74,
            power: 268, powerLimit: 450, vram: 18.4, vramTotal: 24,
            clockSm: 1725, clockMem: 10251, fan: 1480, pcie: 'PCIe 4 x16' },
@@ -404,10 +406,15 @@ function demoStep() {
   d.host.uptime += 1;
   state.gpu = { ...d.gpu };
   state.host = { ...d.host, perCore: d.host.perCore.map(v => Math.max(0, Math.min(100, v + (rand() - 0.5) * 14))) };
+  if (rand() < 0.004) {                                  // rare model swap, like llama-swap
+    const others = DEMO_MODELS.filter(m => m.label !== d.model);
+    d.model = others[Math.floor(rand() * others.length)].label;
+  }
   state.kpi = {
     tps: d.tps, rpm: d.rpm, p95: d.p95, ttft: d.ttft, tpot: d.tpot,
     vram: d.gpu.vram, cache: d.cache, reingest: Math.max(0, 100 - d.cache),
     mtp: 71 + (rand() - 0.5) * 8, queue: d.queue,
+    tps_models: [d.model],
   };
   for (const k of KPI_KEYS) pushHist(state.kpiHist[k] ??= [], state.kpi[k]);
   pushHist(state.engHist.sim ??= [], d.tps);
@@ -597,6 +604,10 @@ function buildKpi() {
       const spark = sparkCanvas('stat-spark', spec.label + ' trend');
       const st = Stat({ label: spec.label, unit: spec.unit || null, value: '—', spark });
       st._unitSpan = spec.unit ? el('span', { class: 'unit' }, spec.unit) : null;
+      if (k === 'tps') {                                   // decode rate names the model it tracks
+        st._model = el('span', { class: 'stat-model', hidden: true });
+        st.el.children[0].append(st._model);                // suffix of the label line, no extra line
+      }
       grp.append(st.el);
       refs[k] = st;
     }
@@ -625,6 +636,19 @@ function buildKpi() {
       stt.delta.textContent = has ? (deltaText(v, prev, spec.diff, 'vs 15m') || '') : '';
       paintSpark(stt.spark, (st.kpiHist && st.kpiHist[k]) || [],
         seriesColor((KPI_TONE[k] || 1) - 1));
+      if (k === 'tps' && stt._model) {
+        const ms = (st.kpi && st.kpi.tps_models) || [];
+        const label = ms.length === 1 ? ms[0] : ms.join(' + ');
+        if (has && label) {
+          stt._model.textContent = label;
+          stt._model.title = label;
+          stt._model.hidden = false;
+          sig += 'm:' + label + ';';
+        } else {
+          stt._model.hidden = true;
+          sig += 'm:-;';
+        }
+      }
       sig += k + ':' + (has ? Math.round(v) : 'n') + ';';
     }
     return sig;

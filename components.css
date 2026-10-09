@@ -140,6 +140,15 @@
 .stat-delta .arrow-up   { color: var(--text-2); }
 .stat-delta .arrow-down { color: var(--text-2); }
 .stat-spark { width: 100%; height: 28px; display: block; }
+/* the decode-rate tile names the model its speed tracks: a muted, normal-case
+   suffix of the label line (flows inline, truncates with the line, adds no height) */
+.stat-model {
+  margin-left: 6px;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-3);
+}
 .stat--sm .stat-value { font-size: var(--fs-label); }
 
 /* --- Meter ------------------------------------------------------------------- */

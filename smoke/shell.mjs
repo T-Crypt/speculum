@@ -411,6 +411,11 @@ if (MODE === 'live') {
   const kpiStats = kpiGroups ? allClass(kpiGroups, 'stat') : [];
   const vals = kpiStats.map(s => statValueText(kids(s)[1]));
   ok(kpiStats.length === 10 && vals.every(v => v !== '—'), 'Demo: all 10 KPI values != "—"');
+  /* decode-rate tile names the model its speed tracks (label-line suffix) */
+  const tpsLabel = kpiStats.length ? kids(kpiStats[0])[0] : null;
+  const tpsModel = tpsLabel ? allClass(tpsLabel, 'stat-model')[0] : null;
+  ok(!!tpsModel && !tpsModel.hidden && tpsModel.textContent.length > 0,
+     'Demo: decode-rate tile names its model as a label suffix');
   const engCards = allClass(panels[6].panel, 'engine-card');
   ok(engCards.length === 1, 'Demo: one engine card (simulated runtime)');
   const cells = allClass(panels[8].panel, 'pool-cell');

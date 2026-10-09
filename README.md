@@ -63,7 +63,7 @@ The deck holds twelve panels:
 
 | Panel | Shows |
 |---|---|
-| **KPI** | ten metrics in four groups: Throughput (decode rate, requests/min), Latency (first token, time per token, p95), Cache (hit rate, re-ingest tax, MTP acceptance), Capacity (VRAM, queue depth). Each carries a 60-min sparkline and a delta against 15 min ago. |
+| **KPI** | ten metrics in four groups: Throughput (decode rate — which names the model it tracks, requests/min), Latency (first token, time per token, p95), Cache (hit rate, re-ingest tax, MTP acceptance), Capacity (VRAM, queue depth). Each carries a 60-min sparkline and a delta against 15 min ago. |
 | **Throughput** | rolling decode tok/s, one trace per engine, 15 min to 30 d. Ranges past 1 h read from the history database. |
 | **GPU & host** | meters for temperature, utilisation, power draw and VRAM, with warn/crit ticks from the real power limit and VRAM total. Device readouts (SM and memory clock, fan, PCIe) plus host CPU, RAM, load and top processes. |
 | **Context** | one bar per live session: prompt tokens against the model window, ticks at 75 % and 90 %. |

@@ -968,6 +968,28 @@ def kpi_thread():
         time.sleep(1.0)
 
 
+def engine_model_name(key, e, swap_models, strata_models):
+    """The model an engine card is decoding, or None: llama-swap models come from
+    its /running set; NInfer names the model as the card label; Strata and
+    discovered engines carry it in their models list / Strata state."""
+    if not e.get("up"):
+        return None
+    origin = e.get("origin")
+    if origin == "llama-swap":
+        for k, m in swap_models:
+            if k == key:
+                return m
+        return None
+    if origin == "ninfer":
+        return e.get("label")
+    if key == "strata":
+        return strata_models[0] if strata_models else None
+    models = e.get("models") or []
+    if models:
+        return models[0].get("id") or None
+    return None
+
+
 def kpi_pass():
     t = now()
     t15 = t - 900
@@ -990,6 +1012,20 @@ def kpi_pass():
             out = sum(r.get("output") or 0 for r in reqs)
             if span > 0:
                 tps = out / min(span * 2, 900.0)
+
+        # tps_models: the model(s) whose decode rate feeds the tps KPI, so the
+        # UI can name what the decode speed is tracking (empty when it cannot)
+        tps_models = []
+        for key, e in engines.items():
+            r = e.get("rates") or {}
+            if r.get("decode_tps") is not None:
+                m = engine_model_name(key, e, S._swap_models, S.strata.get("models") or [])
+                if m and m not in tps_models:
+                    tps_models.append(m)
+        if not tps_models and not have_rate and reqs:
+            m = reqs[0].get("model")
+            if m:
+                tps_models = [m]
 
         rpm = sum(1 for r in S.requests if (r.get("t") or 0) >= t - 60)
         recent = [r for r in S.requests if (r.get("t") or 0) >= t - 300]
@@ -1023,6 +1059,7 @@ def kpi_pass():
             "vram_total": round(gpu_last["memory.total_gb"], 1) if gpu_last else None,
             "cache": cache_pct, "reingest": reingest, "mtp": mtp,
             "queue": queue,
+            "tps_models": tps_models,
         }
         S.kpi["last"] = last
         for k in KPI_KEYS:
@@ -1128,6 +1165,8 @@ def tick():
         kpi = dict(S.kpi["last"])
         # 1 Hz hot values for the tick
         kpi_hot = {k: (S.kpi["hist"][k][-1] if S.kpi["hist"][k] else None) for k in KPI_KEYS}
+        # model attribution rides the tick too, so the label tracks the feed
+        kpi_hot["tps_models"] = kpi.get("tps_models")
         data = {
             "t": now(),
             "gpu": {k: gpu_last.get(k) for k in
