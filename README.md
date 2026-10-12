@@ -63,7 +63,7 @@ The deck holds twelve panels:
 
 | Panel | Shows |
 |---|---|
-| **KPI** | ten metrics in four groups: Throughput (decode rate — which names the model it tracks, requests/min), Latency (first token, time per token, p95), Cache (hit rate, re-ingest tax, MTP acceptance), Capacity (VRAM, queue depth). Each carries a 60-min sparkline and a delta against 15 min ago. |
+| **KPI** | ten metrics in four groups: Throughput (decode rate, which names the model it tracks, and requests/min), Latency (first token, time per token, p95), Cache (hit rate, re-ingest tax, MTP acceptance), Capacity (VRAM, queue depth). Each carries a 60-min sparkline and a delta against 15 min ago. |
 | **Throughput** | rolling decode tok/s, one trace per engine, 15 min to 30 d. Ranges past 1 h read from the history database. |
 | **GPU & host** | meters for temperature, utilisation, power draw and VRAM, with warn/crit ticks from the real power limit and VRAM total. Device readouts (SM and memory clock, fan, PCIe) plus host CPU, RAM, load and top processes. |
 | **Context** | one bar per live session: prompt tokens against the model window, ticks at 75 % and 90 %. |
@@ -154,7 +154,7 @@ port = 9091                 # default http://127.0.0.1:9090
 url = "http://127.0.0.1:8090"   # default http://127.0.0.1:8080
 ```
 
-NInfer has no port of its own: it rides the proxy llama-swap reports in `/running`, so fixing `[llama_swap]` is enough. Ports configured here are skipped by discovery, so they are never mistaken for a separate engine.
+NInfer has no port of its own: it uses the proxy that llama-swap reports in `/running`, so fixing `[llama_swap]` is enough. Ports configured here are skipped by discovery, so they are never mistaken for a separate engine.
 
 ## Demo mode
 
@@ -226,7 +226,7 @@ node smoke/shell.mjs                                        # real app.js shell,
 python3 -m http.server 8792                                 # → http://localhost:8792/?demo
 ```
 
-The UI files are ES modules, so `node --check` does not apply to them. The smoke scripts import and run them, which serves as the parse-and-run check.
+The UI files are ES modules, so `node --check` does not apply to them. The smoke scripts import and run them, which is the parse-and-run check.
 
 The two `test_hostinfo.py` skips are platform gates: the `/proc` backend runs on Linux and the Win32 ctypes backend runs only on Windows. On a Linux box the Windows path is read, not executed, so its numbers stay unverified until you run the suite on Windows.
 
