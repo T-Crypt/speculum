@@ -25,6 +25,18 @@ jobs:
         run: node smoke/ui-primitives.mjs
       - name: app shell and view model
         run: node smoke/shell.mjs
+      - name: collector boots and serves (headless)
+        run: |
+          set -euo pipefail
+          python3 collector/speculum.py --port 18792 &
+          pid=$!
+          for i in $(seq 1 20); do
+            curl -sf http://127.0.0.1:18792/api/snapshot >/dev/null && break
+            sleep 0.5
+          done
+          curl -sf http://127.0.0.1:18792/api/snapshot | python3 -m json.tool | head
+          curl -sN -m 2 http://127.0.0.1:18792/api/stream | head
+          kill "$pid"
 
   windows:
     runs-on: windows-latest
