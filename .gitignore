@@ -17,3 +17,7 @@ speculum.toml
 # docs/ or README.md.
 /docs/scraped/
 /docs/internal/
+
+# [ome]: local hydrated state is never committed
+.ome/events/
+.ome/log/
