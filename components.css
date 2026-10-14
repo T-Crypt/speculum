@@ -497,6 +497,7 @@
   border: none;
   border-left: 1px solid var(--border);
   padding: var(--sp-2) var(--sp-3);
+  min-height: 44px;
   cursor: pointer;
 }
 .segmented button:first-child { border-left: none; }
@@ -505,9 +506,11 @@
   background: var(--accent-soft);
 }
 /* the same primitive in the top bar (Basic / Advanced): it must not shrink in
-   the status cluster, and reads as a control rather than as meta text */
+   the status cluster, and reads as a control rather than as meta text. Only
+   the font size differs per context — the 44 px floor and the padding come
+   from the shared primitive above. */
 .topbar .segmented { flex: none; white-space: nowrap; }
-.topbar .segmented button { font-size: var(--fs-label); padding: 4px 10px; }
+.topbar .segmented button { font-size: var(--fs-label); }
 
 /* --- ripple (optional; see ripple.js) ----------------------------------------------------------- */
 /* a single 400ms radial pulse on data update; off unless <html data-ripple="on"> */
