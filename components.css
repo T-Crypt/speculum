@@ -830,7 +830,9 @@ html[data-ripple="on"] .panel.is-rippling::after {
 }
 .btn:hover { border-color: var(--border-strong); color: var(--text-1); }
 
-/* request history: hide Window column at narrow width (duplicate of model info) */
+/* request history: hide the Window column below 640 px — a deliberate fourth
+   step under the 768 px break (the column duplicates the model info a phone
+   width cannot spare), not an afterthought */
 @media (max-width: 640px) {
   .p-requests th:nth-child(5),
   .p-requests td:nth-child(5) { display: none; }
