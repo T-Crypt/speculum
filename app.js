@@ -762,6 +762,23 @@ function buildThroughput() {
     tp.hoverX = null;
     tip.hidden = true;
   });
+  canvas.addEventListener('touchstart', e => {
+    const r = canvas.getBoundingClientRect();
+    const t = e.touches[0];
+    tp.hoverX = Math.max(0, Math.min(r.width, t.clientX - r.left));
+    tp._touchActive = true;
+  }, { passive: true });
+  canvas.addEventListener('touchmove', e => {
+    if (!tp._touchActive) return;
+    const r = canvas.getBoundingClientRect();
+    const t = e.touches[0];
+    tp.hoverX = Math.max(0, Math.min(r.width, t.clientX - r.left));
+  }, { passive: true });
+  canvas.addEventListener('touchend', () => {
+    tp._touchActive = false;
+    tp.hoverX = null;
+    tip.hidden = true;
+  });
   const setNote = txt => {
     if (tp.noteText === txt) return;   // the paint loop runs 5 Hz: write only on change
     tp.noteText = txt;
@@ -1120,6 +1137,23 @@ function buildContext() {
     cx.hoverX = Math.max(0, Math.min(r.width, e.clientX - r.left));
   });
   canvas.addEventListener('mouseleave', () => { cx.hoverX = null; tip.hidden = true; });
+  canvas.addEventListener('touchstart', e => {
+    const r = canvas.getBoundingClientRect();
+    const t = e.touches[0];
+    cx.hoverX = Math.max(0, Math.min(r.width, t.clientX - r.left));
+    cx._touchActive = true;
+  }, { passive: true });
+  canvas.addEventListener('touchmove', e => {
+    if (!cx._touchActive) return;
+    const r = canvas.getBoundingClientRect();
+    const t = e.touches[0];
+    cx.hoverX = Math.max(0, Math.min(r.width, t.clientX - r.left));
+  }, { passive: true });
+  canvas.addEventListener('touchend', () => {
+    cx._touchActive = false;
+    cx.hoverX = null;
+    tip.hidden = true;
+  });
   const CTX_MAX = 20;
   p.render = st => {
     const sessions = st.sessions || [];
