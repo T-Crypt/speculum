@@ -219,7 +219,12 @@ if IS_WINDOWS:
     def _win_process_name(image_path):
         """Engine label from the image basename; None when not an engine.
         Windows argv is not read, so a python.exe-launched `server.py`
-        (strata) is visible only when the launcher's path says strata."""
+        (strata) is visible only when the launcher's path says strata.
+        Accepts the raw bytes QueryFullProcessImageNameW leaves in a
+        c_char buffer (UTF-16LE) as well as str, decoding here at the
+        ctypes boundary so basename/matching never see bytes."""
+        if isinstance(image_path, bytes):
+            image_path = image_path.decode("utf-16-le", "replace").rstrip("\x00")
         base = os.path.basename(image_path).lower()
         if "llama-server" in base:
             return "llama-server"
@@ -251,7 +256,13 @@ if IS_WINDOWS:
                 if not _kernel32.QueryFullProcessImageNameW(
                         h, 0, name_buf, ctypes.byref(size)):
                     continue
-                name = _win_process_name(name_buf.value)
+                # QueryFullProcessImageNameW writes UTF-16LE; a c_char
+                # buffer surfaces that as bytes, and .value would stop at
+                # the first NUL — mid-character — so slice by the size
+                # the call reports (chars, null terminator included).
+                raw = name_buf.raw[: size.value * 2]
+                image = raw.decode("utf-16-le", "replace").rstrip("\x00")
+                name = _win_process_name(image)
                 if name is None:
                     continue
                 pmi = _PROCESS_MEMORY_COUNTERS()
@@ -261,7 +272,7 @@ if IS_WINDOWS:
                                                ctypes.sizeof(pmi)):
                     rss = round(pmi.WorkingSetSize / 1e9, 2)
                 found.append({"name": name, "pid": pid, "rss_gb": rss,
-                              "cmd": name_buf.value[:120]})
+                              "cmd": image[:120]})
             finally:
                 _kernel32.CloseHandle(h)
         return found
