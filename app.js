@@ -1299,6 +1299,7 @@ function buildRequests() {
     { label: 'TTFT', num: true },
     { label: 'Decode', num: true },
   ], caption: 'Request history' });
+  dt.el.classList.add('p-requests');
   p.body.append(dt.wrap, EmptyState('No requests recorded yet'));
   const emptyEl = p.body.children[p.body.children.length - 1];
   p.render = st => {

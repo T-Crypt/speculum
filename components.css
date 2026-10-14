@@ -826,3 +826,9 @@ html[data-ripple="on"] .panel.is-rippling::after {
   padding: 4px 10px; cursor: pointer; text-decoration: none;
 }
 .btn:hover { border-color: var(--border-strong); color: var(--text-1); }
+
+/* request history: hide Window column at narrow width (duplicate of model info) */
+@media (max-width: 640px) {
+  .p-requests th:nth-child(5),
+  .p-requests td:nth-child(5) { display: none; }
+}
