@@ -21,10 +21,15 @@ jobs:
         run: python3 -m py_compile collector/*.py
       - name: collector suite
         run: python3 -m unittest discover -s collector -p "test_*.py"
+      - name: boot headless collector
+        run: cd collector && timeout 30 python3 speculum.py --port 8792 &
       - name: ui primitives and ripple state machine
         run: node smoke/ui-primitives.mjs
       - name: app shell and view model
         run: node smoke/shell.mjs
+      - name: stop headless collector
+        if: always()
+        run: kill $(lsof -t -i :8792) 2>/dev/null || true
 
   windows:
     runs-on: windows-latest
