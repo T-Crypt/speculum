@@ -22,7 +22,22 @@ jobs:
       - name: collector suite
         run: python3 -m unittest discover -s collector -p "test_*.py"
       - name: boot headless collector
-        run: cd collector && timeout 30 python3 speculum.py --port 8792 &
+        # from the repo root (production shape; statics resolve there);
+        # no timeout cap — the readiness loop below bounds the wait, and
+        # the kill step reaps the process.
+        run: python3 collector/speculum.py --port 8792 &
+      - name: collector readiness and API smoke
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 40); do
+            curl -sf http://127.0.0.1:8792/api/snapshot >/dev/null && break
+            sleep 0.5
+          done
+          curl -sf http://127.0.0.1:8792/api/snapshot | python3 -m json.tool
+          tmp=$(mktemp)
+          timeout 2 curl -sN http://127.0.0.1:8792/api/stream > "$tmp" || true
+          head -n 2 "$tmp"
+          rm -f "$tmp"
       - name: ui primitives and ripple state machine
         run: node smoke/ui-primitives.mjs
       - name: app shell and view model
