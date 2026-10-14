@@ -26,6 +26,16 @@ IS_WINDOWS = hostinfo.IS_WINDOWS
 
 
 class TestBackendSelection(unittest.TestCase):
+    def setUp(self):
+        # Probe the environment once: on a runner that cannot enumerate
+        # processes the backend raises, so the environment-dependent test
+        # below skips with a visible reason instead of masking a real defect.
+        try:
+            hostinfo.processes()
+        except Exception as e:
+            raise unittest.SkipTest(
+                "process enumeration unavailable in this environment: %r" % (e,))
+
     def test_module_is_import_safe_and_dispatched(self):
         for fn in ("cpu_times", "memory", "processes", "load", "uptime_s"):
             self.assertTrue(callable(getattr(hostinfo, fn)))
@@ -36,14 +46,10 @@ class TestBackendSelection(unittest.TestCase):
     def test_ninfer_serve_port_never_raises(self):
         # C1 regression: the old /proc scan raised OSError on Windows and
         # killed the NInfer poller thread; the new path must not raise.
+        # (setUp skips when the environment cannot enumerate processes at
+        # all, so a raise here is a real defect and must fail the test.)
         import speculum
-        try:
-            port = speculum.ninfer_serve_port()
-        except Exception:
-            # Some runner environments (e.g. containers) cannot enumerate
-            # processes at all; treat as non-fatal – the function itself
-            # did not crash the poller thread.
-            return
+        port = speculum.ninfer_serve_port()
         self.assertTrue(port is None or 0 < port < 65536)
 
 
@@ -80,11 +86,10 @@ class TestLinuxBackend(unittest.TestCase):
 
     def test_processes_shape(self):
         for p in hostinfo.processes():
-            # Allow >= 0: containerised CI may report 0 bytes RSS before pages are faulted in.
             self.assertEqual(set(p), {"name", "pid", "rss_gb", "cmd"})
             self.assertIn(p["name"], ("llama-server", "ninfer-serve", "strata"))
             self.assertGreater(p["pid"], 0)
-            self.assertTrue(p["rss_gb"] is None or p["rss_gb"] >= 0)
+            self.assertTrue(p["rss_gb"] is None or p["rss_gb"] > 0)
             self.assertLessEqual(len(p["cmd"]), 120)
 
     def test_processes_matches_fake_engine(self):
@@ -95,23 +100,24 @@ class TestLinuxBackend(unittest.TestCase):
             os.chmod(exe, 0o755)
             proc = subprocess.Popen([exe])
             try:
+                # Bounded poll: /proc/<pid> can appear before its status
+                # file carries VmRSS, so wait until the entry is visible
+                # with its RSS resolved (or the deadline passes) rather than
+                # sleeping a fixed, guessed amount.
                 hit = None
                 deadline = time.time() + 5
                 while time.time() < deadline:
                     hit = [p for p in hostinfo.processes()
                            if p["pid"] == proc.pid]
-                    if hit:
+                    if hit and hit[0]["rss_gb"] is not None:
                         break
                     time.sleep(0.1)
                 self.assertTrue(hit,
                                 "fake llama-server not seen by hostinfo.processes()")
                 p = hit[0]
-                # Give the kernel a moment to populate /proc/<pid>/status
-                # with RSS data after the PID first appears.
-                time.sleep(0.05)
                 self.assertEqual(p["name"], "llama-server")
                 self.assertIn("llama-server", p["cmd"])
-                self.assertTrue(p["rss_gb"] is None or p["rss_gb"] >= 0)
+                self.assertTrue(p["rss_gb"] is None or p["rss_gb"] > 0)
             finally:
                 proc.kill()
                 proc.wait()
@@ -137,18 +143,14 @@ class TestWindowsBackend(unittest.TestCase):
             self.assertTrue(all_c >= idle_c >= 0)
 
     def test_load_uptime_processes(self):
-        try:
-            self.assertIsNone(hostinfo.load())   # no load average on Windows
-            self.assertGreater(hostinfo.uptime_s(), 0)
-            procs = hostinfo.processes()
-        except Exception:
-            # Some runner environments crash when enumerating processes
-            # (e.g. bytes-vs-str in _win_process_name). Skip gracefully.
-            return
-        for p in procs:
-            # Allow >= 0: containerised CI may report 0 bytes RSS.
+        # No try/except here: on Windows this test is the only execution of
+        # the ctypes process path, so a raise (e.g. the old bytes-vs-str
+        # crash in _win_process_name) must fail, not mask itself.
+        self.assertIsNone(hostinfo.load())   # no load average on Windows
+        self.assertGreater(hostinfo.uptime_s(), 0)
+        for p in hostinfo.processes():
             self.assertEqual(set(p), {"name", "pid", "rss_gb", "cmd"})
             self.assertIn(p["name"], ("llama-server", "ninfer-serve", "strata"))
             self.assertGreater(p["pid"], 0)
-            self.assertTrue(p["rss_gb"] is None or p["rss_gb"] >= 0)
+            self.assertTrue(p["rss_gb"] is None or p["rss_gb"] > 0)
             self.assertLessEqual(len(p["cmd"]), 120)
