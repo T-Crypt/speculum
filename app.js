@@ -554,9 +554,14 @@ function renderTopbar() {
 }
 
 function renderFoot() {
-  $('#foot').innerHTML =
-    `<kbd>P</kbd> pause · <kbd>R</kbd> resync · feed: ${state.feed} · mode: ${state.mode} · ` +
-    `<code>?demo</code> = seeded simulator`;
+  const foot = $('#foot');
+  if (window.innerWidth <= 768) {
+    foot.textContent = `${state.mode} · ${state.feed}`;
+  } else {
+    foot.innerHTML =
+      `<kbd>P</kbd> pause · <kbd>R</kbd> resync · feed: ${state.feed} · mode: ${state.mode} · ` +
+      `<code>?demo</code> = seeded simulator`;
+  }
 }
 
 /* --- panel registry (panel modules push themselves in) ----------------------- */
