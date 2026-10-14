@@ -554,9 +554,14 @@ function renderTopbar() {
 }
 
 function renderFoot() {
-  $('#foot').innerHTML =
-    `<kbd>P</kbd> pause · <kbd>R</kbd> resync · feed: ${state.feed} · mode: ${state.mode} · ` +
-    `<code>?demo</code> = seeded simulator`;
+  const foot = $('#foot');
+  if (window.innerWidth <= 768) {
+    foot.textContent = `${state.mode} · ${state.feed}`;
+  } else {
+    foot.innerHTML =
+      `<kbd>P</kbd> pause · <kbd>R</kbd> resync · feed: ${state.feed} · mode: ${state.mode} · ` +
+      `<code>?demo</code> = seeded simulator`;
+  }
 }
 
 /* --- panel registry (panel modules push themselves in) ----------------------- */
@@ -733,6 +738,23 @@ function tpRelLabel(sec) {
   if (sec >= 3600) return '−' + Math.round(sec / 3600) + 'h';
   return '−' + Math.round(sec / 60) + 'm';
 }
+/* shared pointer handling for the canvas charts: clamp the pointer x to the
+   canvas width (the paint loop clamps to the plot area again) and track touch
+   activity so a stale touch never moves the tooltip. The browser can cancel
+   an in-progress touch (user starts scrolling), so touchcancel clears the
+   state like touchend — otherwise the tooltip stays pinned. */
+function canvasClampX(canvas, clientX) {
+  const r = canvas.getBoundingClientRect();
+  return Math.max(0, Math.min(r.width, clientX - r.left));
+}
+function attachCanvasTouch(canvas, state, tip) {
+  const setX = e => { state.hoverX = canvasClampX(canvas, e.touches[0].clientX); };
+  const clear = () => { state._touchActive = false; state.hoverX = null; tip.hidden = true; };
+  canvas.addEventListener('touchstart', e => { setX(e); state._touchActive = true; }, { passive: true });
+  canvas.addEventListener('touchmove', e => { if (state._touchActive) setX(e); }, { passive: true });
+  canvas.addEventListener('touchend', clear);
+  canvas.addEventListener('touchcancel', clear);
+}
 function buildThroughput() {
   const p = makePanel('p-throughput', 'Throughput', 'decode tok/s per engine · 1 s samples, 8 s smoothed', {
     tools: el('span', { class: 'tp-tools' },
@@ -750,13 +772,13 @@ function buildThroughput() {
   const tp = { range: '1h', canvas, wrap, tip, legend, legendDirty: true, geo: null, hoverX: null,
     hist: null, histAt: 0, histError: false, fetching: false, note, noteText: '' };
   canvas.addEventListener('mousemove', e => {
-    const r = canvas.getBoundingClientRect();
-    tp.hoverX = Math.max(0, Math.min(r.width, e.clientX - r.left));
+    tp.hoverX = canvasClampX(canvas, e.clientX);
   });
   canvas.addEventListener('mouseleave', () => {
     tp.hoverX = null;
     tip.hidden = true;
   });
+  attachCanvasTouch(canvas, tp, tip);
   const setNote = txt => {
     if (tp.noteText === txt) return;   // the paint loop runs 5 Hz: write only on change
     tp.noteText = txt;
@@ -1111,10 +1133,10 @@ function buildContext() {
   p.body.append(wrap, legend, list, more, empty);
   const cx = { cols: [], hoverIdx: null, hoverX: null, geo: null };
   canvas.addEventListener('mousemove', e => {
-    const r = canvas.getBoundingClientRect();
-    cx.hoverX = Math.max(0, Math.min(r.width, e.clientX - r.left));
+    cx.hoverX = canvasClampX(canvas, e.clientX);
   });
   canvas.addEventListener('mouseleave', () => { cx.hoverX = null; tip.hidden = true; });
+  attachCanvasTouch(canvas, cx, tip);
   const CTX_MAX = 20;
   p.render = st => {
     const sessions = st.sessions || [];
@@ -1299,6 +1321,7 @@ function buildRequests() {
     { label: 'TTFT', num: true },
     { label: 'Decode', num: true },
   ], caption: 'Request history' });
+  dt.el.classList.add('p-requests');
   p.body.append(dt.wrap, EmptyState('No requests recorded yet'));
   const emptyEl = p.body.children[p.body.children.length - 1];
   p.render = st => {
@@ -1538,7 +1561,8 @@ function renderAlerts() {
   box.dataset.sig = sig;
   box.hidden = list.length === 0;
   box.replaceChildren(...list.map(a => el('div', { class: 'alert-line' },
-    Badge({ status: 'warn', label: 'alert', dot: true }), el('span', { class: 'alert-msg' }, a))));
+    Badge({ status: 'warn', label: 'alert', dot: true }),
+    el('span', { class: 'alert-msg', title: a }, a))));
 }
 
 function fmtBytes(b) {
