@@ -1538,7 +1538,8 @@ function renderAlerts() {
   box.dataset.sig = sig;
   box.hidden = list.length === 0;
   box.replaceChildren(...list.map(a => el('div', { class: 'alert-line' },
-    Badge({ status: 'warn', label: 'alert', dot: true }), el('span', { class: 'alert-msg' }, a))));
+    Badge({ status: 'warn', label: 'alert', dot: true }),
+    el('span', { class: 'alert-msg', title: a }, a))));
 }
 
 function fmtBytes(b) {
