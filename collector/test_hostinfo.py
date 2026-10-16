@@ -89,7 +89,9 @@ class TestLinuxBackend(unittest.TestCase):
             self.assertEqual(set(p), {"name", "pid", "rss_gb", "cmd"})
             self.assertIn(p["name"], ("llama-server", "ninfer-serve", "strata"))
             self.assertGreater(p["pid"], 0)
-            self.assertTrue(p["rss_gb"] is None or p["rss_gb"] > 0)
+            # rss_gb is rounded to 2 dp in GB, so a tiny launcher/wrapper
+            # process legitimately reports 0.0
+            self.assertTrue(p["rss_gb"] is None or p["rss_gb"] >= 0)
             self.assertLessEqual(len(p["cmd"]), 120)
 
     def test_processes_matches_fake_engine(self):
@@ -117,7 +119,7 @@ class TestLinuxBackend(unittest.TestCase):
                 p = hit[0]
                 self.assertEqual(p["name"], "llama-server")
                 self.assertIn("llama-server", p["cmd"])
-                self.assertTrue(p["rss_gb"] is None or p["rss_gb"] > 0)
+                self.assertTrue(p["rss_gb"] is None or p["rss_gb"] >= 0)
             finally:
                 proc.kill()
                 proc.wait()
