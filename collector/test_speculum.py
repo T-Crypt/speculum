@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Tests for KPI model attribution: engine_model_name, and the tps_models field
-kpi_pass emits so the UI can name the model behind the decode rate."""
+kpi_pass emits so the UI can name the model behind the decode rate. Also the
+/api/requests query contract (`since`, `limit`, and its 400s)."""
 
 import unittest
 
@@ -99,6 +100,62 @@ class TestBuiltinEndpoints(unittest.TestCase):
             speculum.endpoint_url({"host": "gpu.lan"},
                                   "http://127.0.0.1:8080"),
             "http://gpu.lan:8080")
+
+
+class _FakeHist:
+    """Records the (since, limit) the API hands to the history layer."""
+
+    def __init__(self):
+        self.calls = []
+
+    def requests(self, since, limit=1000):
+        self.calls.append((since, limit))
+        return []
+
+
+class _JsonRecorder(speculum.Handler):
+    """A Handler with its socket stripped out: records what _json would send,
+    so the request-API query validation runs without a real server."""
+
+    def __init__(self):
+        self.responses = []
+
+    def _json(self, obj, code=200):
+        self.responses.append((code, obj))
+
+
+class TestRequestsApiContract(unittest.TestCase):
+    """GET /api/requests reads `since` (epoch seconds) and `limit`; the README
+    documents those two params. History.requests then clamps limit to 1000."""
+
+    def setUp(self):
+        self._real_hist = speculum.HIST
+        self.fake = _FakeHist()
+        speculum.HIST = self.fake
+
+    def tearDown(self):
+        speculum.HIST = self._real_hist
+
+    def test_defaults_since_zero_and_limit_1000(self):
+        h = _JsonRecorder()
+        h._requests_api("")
+        self.assertEqual(self.fake.calls, [(0, 1000)])
+        self.assertEqual(h.responses[-1][0], 200)
+
+    def test_since_and_limit_are_passed_through(self):
+        h = _JsonRecorder()
+        h._requests_api("since=1700000000&limit=50")
+        self.assertEqual(self.fake.calls, [(1700000000, 50)])
+        self.assertEqual(h.responses[-1][0], 200)
+
+    def test_non_integer_or_zero_limit_is_rejected(self):
+        for query in ("since=abc", "limit=x", "limit=0"):
+            with self.subTest(query=query):
+                h = _JsonRecorder()
+                h._requests_api(query)
+                self.assertEqual(h.responses[-1], (400, {
+                    "error": "since and limit must be integers"}))
+        self.assertEqual(self.fake.calls, [])   # nothing was queried
 
 
 if __name__ == "__main__":
