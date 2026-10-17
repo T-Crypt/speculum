@@ -191,7 +191,7 @@ The collector keeps bounded in-memory buffers: 60 minutes of GPU, host and KPI s
 | `GET /api/snapshot` | one-shot full JSON (state plus history) |
 | `GET /api/stream` | SSE: 1 Hz `tick` plus push events |
 | `GET /api/history?range=…` | rollup rows, minute and hour |
-| `GET /api/requests?range=…` | raw request rows, capped at 1000 |
+| `GET /api/requests?since=…&limit=…` | raw request rows, newest first, capped at 1000 |
 | `GET /api/spans?range=…` | model load spans |
 | `GET /api/leaderboard?range=…` | per-model statistics |
 | `GET /api/storage` | database size, retention, projections |
@@ -228,7 +228,7 @@ python3 -m http.server 8792                                 # → http://localho
 
 The UI files are ES modules, so `node --check` does not apply to them. The smoke scripts import and run them, which is the parse-and-run check.
 
-The two `test_hostinfo.py` skips are platform gates: the `/proc` backend runs on Linux and the Win32 ctypes backend runs only on Windows. On a Linux box the Windows path is read, not executed, so its numbers stay unverified until you run the suite on Windows.
+The `test_hostinfo.py` platform gates skip the Windows ctypes backend on Linux and the `/proc` backend on Windows. On a Linux box the Windows path is read, not executed, so its numbers stay unverified until you run the suite on Windows.
 
 ## Origin
 
